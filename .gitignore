@@ -1,0 +1,20 @@
+.DS_Store
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+build/
+dist/
+*.egg-info/
+
+# Runtime ledgers and local launch logs. These can be large and may contain
+# noisy live-market diagnostics; regenerate them with the reporting scripts.
+outputs/
+work/
+
+# Local environment / credentials
+.env
+.env.*

@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "poly-5m-paper-trader"
+version = "0.1.0"
+description = "Paper trading harness for Polymarket BTC 5-minute Up/Down markets"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.scripts]
+poly-5m-paper = "poly_5m_bot.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
