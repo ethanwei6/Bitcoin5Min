@@ -156,13 +156,17 @@ This mirrors the pre-submit execution path while remaining paper-only.
 ## Risk Controls
 
 The first long paper run peaked early and then failed because the strategy kept
-trading after the realized PnL regime flipped. The current default config is
-therefore conservative:
+trading after the realized PnL regime flipped. The next run was profitable but
+showed a different leak: very large model-market dislocations and late-contract
+entries were worse than moderate, executable edges. The current default config
+is therefore conservative:
 
 - `max_daily_drawdown_usd`: 100
 - `max_consecutive_losses`: 6
 - `max_entries_per_market`: 2
 - `max_contract_entry_price`: 0.60
+- `max_edge`: 0.20
+- `max_seconds_after_market_start`: 210
 - `max_trade_usd`: 25
 - `kelly_fraction`: 0.25
 

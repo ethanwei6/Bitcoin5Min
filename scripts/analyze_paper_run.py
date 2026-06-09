@@ -38,6 +38,17 @@ def pair_trades(output_dir: Path) -> list[dict[str, Any]]:
                 "cost_usd": float(position["cost_usd"]),
                 "opened_at": float(position["opened_at"]),
                 "opened_utc": datetime.fromtimestamp(float(position["opened_at"]), timezone.utc),
+                "seconds_from_start": float(position["opened_at"])
+                - float(position["market_start_epoch"]),
+                "executed_edge": (
+                    float(trade["decision"]["probability"])
+                    - (
+                        float((trade.get("execution") or {}).get("fill_cost_usd", 0.0))
+                        / float((trade.get("execution") or {}).get("fill_shares", 1.0))
+                    )
+                    if (trade.get("execution") or {}).get("fill_shares")
+                    else float(trade["decision"].get("edge", 0.0))
+                ),
                 "pnl_usd": pnl,
             }
         )
@@ -150,7 +161,58 @@ def counterfactuals(rows: list[dict[str, Any]]) -> dict[str, Any]:
             "kept_trades": len(kept_rows),
             "pnl_usd": sum(row["pnl_usd"] for row in kept_rows),
         }
+    for cap in [0.15, 0.20, 0.25]:
+        kept_rows = [
+            row
+            for row in rows
+            if row["pnl_usd"] is not None and row["executed_edge"] <= cap
+        ]
+        results[f"edge_dislocation_cap_{cap:.2f}"] = {
+            "kept_trades": len(kept_rows),
+            "pnl_usd": sum(row["pnl_usd"] for row in kept_rows),
+        }
+    for start, end in [(15, 180), (15, 210), (30, 210), (45, 210)]:
+        kept_rows = [
+            row
+            for row in rows
+            if row["pnl_usd"] is not None and start <= row["seconds_from_start"] <= end
+        ]
+        results[f"entry_window_{start}_{end}s"] = {
+            "kept_trades": len(kept_rows),
+            "pnl_usd": sum(row["pnl_usd"] for row in kept_rows),
+        }
     return results
+
+
+def key_finding(report: dict[str, Any]) -> str:
+    baseline = report["summary"]["realized_pnl_usd"]
+    improvements = [
+        (name, row)
+        for name, row in report["counterfactuals"].items()
+        if row["kept_trades"] >= 10 and row["pnl_usd"] > baseline
+    ]
+    if not improvements:
+        return (
+            "No simple single-rule counterfactual beat the ledger by enough to justify "
+            "tightening production rules from this sample alone."
+        )
+    name, row = max(improvements, key=lambda item: item[1]["pnl_usd"])
+    if name.startswith("edge_dislocation_cap"):
+        return (
+            f"The best simple improvement was `{name}`: it kept `{row['kept_trades']}` "
+            f"trades and would have produced `${row['pnl_usd']:.2f}`. This points to "
+            "overconfident model-market dislocations, not low confidence, as the main leak."
+        )
+    if name.startswith("entry_window"):
+        return (
+            f"The best simple improvement was `{name}`: it kept `{row['kept_trades']}` "
+            f"trades and would have produced `${row['pnl_usd']:.2f}`. This points to "
+            "opening/late-contract timing risk as the main leak."
+        )
+    return (
+        f"The best simple improvement was `{name}`: it kept `{row['kept_trades']}` "
+        f"trades and would have produced `${row['pnl_usd']:.2f}`."
+    )
 
 
 def markdown(report: dict[str, Any]) -> str:
@@ -170,7 +232,7 @@ def markdown(report: dict[str, Any]) -> str:
         "",
         "## Key Failure",
         "",
-        "The strategy kept trading after the realized PnL regime flipped. The strongest counterfactual on this ledger is a peak-to-trough daily drawdown stop, not a larger Kelly fraction or a looser entry rule.",
+        key_finding(report),
         "",
         "## Counterfactuals",
         "",
@@ -184,6 +246,12 @@ def markdown(report: dict[str, Any]) -> str:
     lines.extend(["", "## Hourly PnL UTC", "", "| Hour | Trades | PnL | Win Rate |", "|---:|---:|---:|---:|"])
     for hour, row in report["by_hour_utc"].items():
         lines.append(f"| {hour} | {row['trades']} | ${row['pnl_usd']:.2f} | {row['win_rate']:.3f} |")
+    lines.extend(["", "## PnL By Side", "", "| Side | Trades | PnL | Win Rate |", "|---|---:|---:|---:|"])
+    for side, row in report["by_side"].items():
+        lines.append(f"| {side} | {row['trades']} | ${row['pnl_usd']:.2f} | {row['win_rate']:.3f} |")
+    lines.extend(["", "## PnL By Entry Timing", "", "| Window | Trades | PnL | Win Rate |", "|---|---:|---:|---:|"])
+    for window, row in report["by_entry_timing"].items():
+        lines.append(f"| {window} | {row['trades']} | ${row['pnl_usd']:.2f} | {row['win_rate']:.3f} |")
     lines.extend(["", "## Worst Markets", "", "| Market | Trades | Side | Winner | PnL |", "|---|---:|---|---|---:|"])
     for row in report["worst_markets"]:
         lines.append(
@@ -207,6 +275,20 @@ def main() -> None:
         "by_entry_price": grouped(
             rows,
             lambda row: "cheap<=0.35" if row["price"] <= 0.35 else "expensive>=0.65" if row["price"] >= 0.65 else "mid",
+        ),
+        "by_entry_timing": grouped(
+            rows,
+            lambda row: (
+                "<30s"
+                if row["seconds_from_start"] < 30
+                else "30-60s"
+                if row["seconds_from_start"] < 60
+                else "60-120s"
+                if row["seconds_from_start"] < 120
+                else "120-220s"
+                if row["seconds_from_start"] < 220
+                else "220s+"
+            ),
         ),
         "worst_markets": market_table(rows, reverse=False),
         "best_markets": market_table(rows, reverse=True),

@@ -89,6 +89,8 @@ real strategy. The paper broker now runs a stricter CLOB execution simulation:
 7. It walks refreshed asks up to `execution_max_slippage_ticks`.
 8. It fills, partially fills, or rejects the paper order according to
    `execution_order_type` and `execution_min_fill_ratio`.
+9. Accepted fills must still pass the post-execution risk check before the
+   paper broker records a position.
 
 This does not sign or post any order. It mirrors the real pre-submit path while
 remaining paper-only. If a real adapter is added later, it should use the same
@@ -224,14 +226,17 @@ Do not promote to live trading until the paper ledger demonstrates:
 ## Current risk lessons
 
 The first 263-trade paper ledger peaked early and then failed because the bot
-kept trading through a dead realized-PnL regime. The current config therefore
-uses:
+kept trading through a dead realized-PnL regime. The next longer ledger was
+positive, but its losses clustered in late-contract entries and very large
+model-market dislocations. The current config therefore uses:
 
 - `max_daily_drawdown_usd`: 100
 - `max_consecutive_losses`: 6
 - `max_entries_per_market`: 2
 - `max_contract_entry_price`: 0.60
+- `max_edge`: 0.20
+- `max_seconds_after_market_start`: 210
 
-These are not proof of alpha. They are guardrails against the specific failure:
-uncalibrated probability forecasts repeatedly buying five-minute binary
-contracts after the live regime changed.
+These are not proof of alpha. They are guardrails against observed failures:
+uncalibrated probability forecasts, stale-looking apparent bargains, and entries
+too close to the end of a five-minute binary contract.

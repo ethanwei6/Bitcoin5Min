@@ -57,6 +57,11 @@ class RiskEngine:
                 return self._reject("NONE", "no strict model majority", forecast.p_up)
         if seconds_from_start < self.config.min_seconds_after_market_start:
             return self._reject("NONE", "too soon after market start", forecast.p_up)
+        if (
+            self.config.max_seconds_after_market_start > 0
+            and seconds_from_start > self.config.max_seconds_after_market_start
+        ):
+            return self._reject("NONE", "too late after market start", forecast.p_up)
         if seconds_to_end < self.config.decision_cutoff_seconds_before_end:
             return self._reject("NONE", "too close to resolution", forecast.p_up)
         if daily_pnl_usd <= -abs(self.config.max_daily_loss_usd):
@@ -78,6 +83,8 @@ class RiskEngine:
             return self._reject(side, "no executable ask", win_probability)
 
         executable_price = book.best_ask.price
+        if executable_price < self.config.min_contract_entry_price:
+            return self._reject(side, "contract price below risk floor", win_probability)
         if executable_price > self.config.max_contract_entry_price:
             return self._reject(side, "contract price above risk cap", win_probability)
         effective_cost = executable_price + taker_fee_per_share(executable_price, self.config.fee_rate)
@@ -94,6 +101,19 @@ class RiskEngine:
                 spend_usd=0.0,
                 kelly_fraction_full=0.0,
                 reason="edge below threshold",
+            )
+        if edge > self.config.max_edge:
+            return TradeDecision(
+                should_trade=False,
+                side=side,
+                probability=win_probability,
+                executable_price=executable_price,
+                effective_cost=effective_cost,
+                edge=edge,
+                shares=0.0,
+                spend_usd=0.0,
+                kelly_fraction_full=0.0,
+                reason="edge above dislocation cap",
             )
 
         kelly_full = full_kelly_fraction(win_probability, effective_cost)
@@ -123,6 +143,33 @@ class RiskEngine:
             reason="trade eligible",
         )
 
+    def check_execution_fill(
+        self,
+        decision: TradeDecision,
+        *,
+        fill_price: float,
+        fill_cost_usd: float,
+        fill_shares: float,
+    ) -> dict[str, float | bool | str]:
+        if fill_shares <= 0.0:
+            return self._execution_reject("no executed shares", 0.0, 0.0)
+        effective_cost = fill_cost_usd / fill_shares
+        edge = decision.probability - effective_cost
+        if fill_price < self.config.min_contract_entry_price:
+            return self._execution_reject("fill price below risk floor", effective_cost, edge)
+        if fill_price > self.config.max_contract_entry_price:
+            return self._execution_reject("fill price above risk cap", effective_cost, edge)
+        if edge < self.config.min_edge:
+            return self._execution_reject("executed edge below threshold", effective_cost, edge)
+        if edge > self.config.max_edge:
+            return self._execution_reject("executed edge above dislocation cap", effective_cost, edge)
+        return {
+            "accepted": True,
+            "reason": "execution fill still clears risk",
+            "effective_cost": effective_cost,
+            "edge": edge,
+        }
+
     @staticmethod
     def _reject(side: str, reason: str, probability: float) -> TradeDecision:
         return TradeDecision(
@@ -137,3 +184,12 @@ class RiskEngine:
             kelly_fraction_full=0.0,
             reason=reason,
         )
+
+    @staticmethod
+    def _execution_reject(reason: str, effective_cost: float, edge: float) -> dict[str, float | bool | str]:
+        return {
+            "accepted": False,
+            "reason": reason,
+            "effective_cost": effective_cost,
+            "edge": edge,
+        }

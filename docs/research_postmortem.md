@@ -61,6 +61,9 @@ The current implementation now includes:
 - Consecutive-loss kill switch via `max_consecutive_losses`.
 - Per-market entry cap via `max_entries_per_market`.
 - Contract entry price cap via `max_contract_entry_price`.
+- Model-market dislocation cap via `max_edge`.
+- Intra-contract timing cap via `max_seconds_after_market_start`.
+- Post-execution risk check before a simulated fill is recorded as a paper trade.
 - Clean output-directory override for separate strategy iterations.
 - `scripts/analyze_paper_run.py` for repeatable postmortem generation.
 

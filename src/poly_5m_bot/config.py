@@ -39,9 +39,12 @@ class BotConfig:
     max_daily_drawdown_usd: float
     max_consecutive_losses: int
     max_entries_per_market: int
+    min_contract_entry_price: float
     max_contract_entry_price: float
+    max_edge: float
     fee_rate: float
     min_seconds_after_market_start: int
+    max_seconds_after_market_start: int
     max_start_capture_lag_seconds: int
     drain_before_stop_seconds: int
     max_spot_source_spread_usd: float
@@ -100,9 +103,14 @@ def load_config(path: str | Path) -> BotConfig:
         max_daily_drawdown_usd=float(_optional(raw, "max_daily_drawdown_usd", 100.0)),
         max_consecutive_losses=int(_optional(raw, "max_consecutive_losses", 6)),
         max_entries_per_market=int(_optional(raw, "max_entries_per_market", 2)),
+        min_contract_entry_price=float(_optional(raw, "min_contract_entry_price", 0.0)),
         max_contract_entry_price=float(_optional(raw, "max_contract_entry_price", 0.60)),
+        max_edge=float(_optional(raw, "max_edge", 1.0)),
         fee_rate=float(_require(raw, "fee_rate")),
         min_seconds_after_market_start=int(_require(raw, "min_seconds_after_market_start")),
+        max_seconds_after_market_start=int(
+            _optional(raw, "max_seconds_after_market_start", 0)
+        ),
         max_start_capture_lag_seconds=int(_require(raw, "max_start_capture_lag_seconds")),
         drain_before_stop_seconds=int(_require(raw, "drain_before_stop_seconds")),
         max_spot_source_spread_usd=float(_require(raw, "max_spot_source_spread_usd")),

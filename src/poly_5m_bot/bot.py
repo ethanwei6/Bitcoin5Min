@@ -211,8 +211,18 @@ class PaperTradingBot:
                 "decision": decision,
                 "execution": execution,
             }
-            self.journal.append("execution_simulations.jsonl", execution_record)
             if not execution.accepted:
+                self.journal.append("execution_simulations.jsonl", execution_record)
+                return
+            post_execution_risk = self.risk.check_execution_fill(
+                decision,
+                fill_price=execution.fill_price,
+                fill_cost_usd=execution.fill_cost_usd,
+                fill_shares=execution.fill_shares,
+            )
+            execution_record["post_execution_risk"] = post_execution_risk
+            self.journal.append("execution_simulations.jsonl", execution_record)
+            if not post_execution_risk["accepted"]:
                 return
             self.broker.open_position(
                 market,
