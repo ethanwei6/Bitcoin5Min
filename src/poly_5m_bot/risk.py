@@ -52,9 +52,13 @@ class RiskEngine:
         if len(forecast.forecasts) < self.config.min_models_required:
             return self._reject("NONE", "not enough model forecasts", forecast.p_up)
         if self.config.trade_only_if_majority:
-            strict_majority = len(forecast.forecasts) // 2 + 1
-            if forecast.majority_count < strict_majority:
-                return self._reject("NONE", "no strict model majority", forecast.p_up)
+            if forecast.total_weight > 0.0:
+                if forecast.majority_weight <= forecast.total_weight / 2.0:
+                    return self._reject("NONE", "no strict weighted model majority", forecast.p_up)
+            else:
+                strict_majority = len(forecast.forecasts) // 2 + 1
+                if forecast.majority_count < strict_majority:
+                    return self._reject("NONE", "no strict model majority", forecast.p_up)
         if seconds_from_start < self.config.min_seconds_after_market_start:
             return self._reject("NONE", "too soon after market start", forecast.p_up)
         if (

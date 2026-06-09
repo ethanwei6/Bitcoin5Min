@@ -61,8 +61,11 @@ The current implementation now includes:
 - Consecutive-loss kill switch via `max_consecutive_losses`.
 - Per-market entry cap via `max_entries_per_market`.
 - Contract entry price cap via `max_contract_entry_price`.
-- Model-market dislocation cap via `max_edge`.
-- Intra-contract timing cap via `max_seconds_after_market_start`.
+- Calibrated ensemble aggregation with volatility-core weighted probability pooling.
+- Market-prior anchoring from the live Up/Down order books.
+- Disagreement shrinkage when model probabilities are dispersed.
+- `scripts/backtest_models.py` for underlying-price model validation across
+  current Polymarket 5M crypto assets.
 - Post-execution risk check before a simulated fill is recorded as a paper trade.
 - Clean output-directory override for separate strategy iterations.
 - `scripts/analyze_paper_run.py` for repeatable postmortem generation.
@@ -72,12 +75,12 @@ The current implementation now includes:
 The alpha, if it exists, is not "the ensemble is always smarter than the
 market." The more realistic hypothesis is narrower:
 
-- There may be short time windows where Polymarket's five-minute BTC markets
+- There may be short time windows where Polymarket's five-minute crypto markets
   lag realized spot movement.
 - The strategy needs to avoid paying up for already-consensus contracts.
 - Risk controls should stop trading after realized calibration turns bad.
 - Evaluation should focus on net PnL after taker fees, marketable-order delay,
   fill slippage, and official-resolution basis.
 
-The next research step is another clean paper ledger under the stricter config,
-not live trading.
+The next research step is another clean paper ledger using the underlying-tested
+volatility-core ensemble, not live trading.

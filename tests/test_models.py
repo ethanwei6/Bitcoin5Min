@@ -4,11 +4,43 @@ import math
 
 from poly_5m_bot.models import (
     Ensemble,
+    EmpiricalIntervalKnnModel,
+    ForecastModel,
     GarchVolatilityModel,
     MertonJumpDiffusionModel,
+    ModelForecast,
     PriceObservation,
+    RegimeSwitchingVolatilityModel,
     RollingPriceWindow,
+    StudentTGarchModel,
 )
+from poly_5m_bot.orderbook import BookLevel, OrderBook
+
+
+class StaticModel(ForecastModel):
+    def __init__(self, name: str, p_up: float):
+        self.name = name
+        self.p_up = p_up
+
+    def forecast(self, window, observation, up_book, down_book):
+        return ModelForecast(
+            name=self.name,
+            p_up=self.p_up,
+            expected_end_price=observation.spot_price,
+            confidence=abs(self.p_up - 0.5) * 2,
+            reason="static test forecast",
+        )
+
+
+def make_book(bid: float, ask: float) -> OrderBook:
+    return OrderBook(
+        token_id="token",
+        bids=[BookLevel(price=bid, size=100.0)],
+        asks=[BookLevel(price=ask, size=100.0)],
+        tick_size="0.01",
+        min_order_size=5.0,
+        hash="hash",
+    )
 
 
 def test_window_only_captures_interval_start_when_seen_early() -> None:
@@ -55,6 +87,26 @@ def populated_window() -> tuple[RollingPriceWindow, PriceObservation]:
     return window, latest
 
 
+def minute_window() -> tuple[RollingPriceWindow, PriceObservation]:
+    window = RollingPriceWindow(maxlen=360, max_start_capture_lag_seconds=65)
+    price = 100.0
+    latest = None
+    start = 1000
+    for index in range(180):
+        timestamp = start + index * 60
+        market_start = timestamp - (timestamp % 300)
+        price *= math.exp(0.0009 * math.sin(index / 5) + 0.0003 * math.cos(index / 13))
+        latest = PriceObservation(
+            timestamp=timestamp,
+            market_start_epoch=market_start,
+            market_end_epoch=market_start + 300,
+            spot_price=price,
+        )
+        window.append(latest)
+    assert latest is not None
+    return window, latest
+
+
 def test_garch_model_emits_bounded_forecast() -> None:
     window, observation = populated_window()
     forecast = GarchVolatilityModel().forecast(window, observation, None, None)
@@ -79,3 +131,44 @@ def test_default_ensemble_has_multiple_econometric_forecasts() -> None:
     assert "garch_1_1" in names
     assert "merton_jump_diffusion" in names
     assert "har_realized_volatility" in names
+    assert "student_t_garch" in names
+    assert "regime_switching_volatility" in names
+
+
+def test_new_interval_models_emit_bounded_forecasts() -> None:
+    window, observation = minute_window()
+    for model in [
+        StudentTGarchModel(),
+        RegimeSwitchingVolatilityModel(),
+        EmpiricalIntervalKnnModel(),
+    ]:
+        forecast = model.forecast(window, observation, None, None)
+        assert forecast is not None, model.name
+        assert 0.01 <= forecast.p_up <= 0.99
+        assert forecast.expected_end_price > 0
+
+
+def test_ensemble_shrinks_extreme_models_toward_market_prior() -> None:
+    observation = PriceObservation(
+        timestamp=1010,
+        market_start_epoch=1000,
+        market_end_epoch=1300,
+        spot_price=100.0,
+    )
+    ensemble = Ensemble(
+        models=[
+            StaticModel("a", 0.92),
+            StaticModel("b", 0.88),
+            StaticModel("c", 0.84),
+        ],
+        market_prior_weight=0.40,
+    )
+    forecast = ensemble.forecast(
+        RollingPriceWindow(),
+        observation,
+        make_book(0.49, 0.51),
+        make_book(0.49, 0.51),
+    )
+
+    assert forecast is not None
+    assert 0.50 < forecast.p_up < 0.88

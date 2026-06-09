@@ -41,7 +41,11 @@ class PaperTradingBot:
         self.window = RollingPriceWindow(
             max_start_capture_lag_seconds=config.max_start_capture_lag_seconds
         )
-        self.ensemble = Ensemble()
+        self.ensemble = Ensemble(
+            model_weights=config.model_weights or None,
+            market_prior_weight=config.market_prior_weight,
+            disagreement_shrink=config.disagreement_shrink,
+        )
         self.risk = RiskEngine(config)
         self.execution = PaperExecutionSimulator(
             enabled=config.simulate_execution_latency,

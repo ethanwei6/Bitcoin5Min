@@ -35,6 +35,9 @@ def make_config() -> BotConfig:
         max_start_capture_lag_seconds=10,
         drain_before_stop_seconds=360,
         max_spot_source_spread_usd=150.0,
+        model_weights={},
+        market_prior_weight=0.25,
+        disagreement_shrink=0.25,
         simulate_execution_latency=True,
         execution_order_type="FOK",
         execution_max_slippage_ticks=1,
@@ -101,6 +104,42 @@ def test_risk_engine_trades_when_majority_edge_and_caps_pass() -> None:
     assert decision.should_trade
     assert decision.side == "UP"
     assert decision.spend_usd <= 25.0
+
+
+def test_risk_engine_uses_weighted_majority_for_side() -> None:
+    forecasts = [
+        ModelForecast("weak_a", 0.54, 101.0, 0.08, "x"),
+        ModelForecast("weak_b", 0.53, 101.0, 0.06, "x"),
+        ModelForecast("weak_c", 0.52, 101.0, 0.04, "x"),
+        ModelForecast("strong_a", 0.34, 99.0, 0.32, "x"),
+        ModelForecast("strong_b", 0.35, 99.0, 0.30, "x"),
+    ]
+    ensemble = EnsembleForecast(
+        p_up=0.37,
+        expected_end_price=99.5,
+        confidence=0.26,
+        forecasts=forecasts,
+        majority_side="DOWN",
+        majority_count=2,
+        majority_weight=2.4,
+        total_weight=3.0,
+    )
+    decision = RiskEngine(make_config()).decide(
+        forecast=ensemble,
+        up_book=make_book(0.50),
+        down_book=make_book(0.50),
+        cash_usd=1000.0,
+        market_exposure_usd=0.0,
+        market_entries=0,
+        daily_pnl_usd=0.0,
+        daily_drawdown_usd=0.0,
+        consecutive_losses=0,
+        seconds_from_start=30.0,
+        seconds_to_end=120.0,
+    )
+    assert decision.should_trade
+    assert decision.side == "DOWN"
+    assert decision.probability == 0.63
 
 
 def test_risk_engine_rejects_after_daily_drawdown_limit() -> None:

@@ -48,6 +48,9 @@ class BotConfig:
     max_start_capture_lag_seconds: int
     drain_before_stop_seconds: int
     max_spot_source_spread_usd: float
+    model_weights: dict[str, float]
+    market_prior_weight: float
+    disagreement_shrink: float
     simulate_execution_latency: bool
     execution_order_type: str
     execution_max_slippage_ticks: int
@@ -114,6 +117,12 @@ def load_config(path: str | Path) -> BotConfig:
         max_start_capture_lag_seconds=int(_require(raw, "max_start_capture_lag_seconds")),
         drain_before_stop_seconds=int(_require(raw, "drain_before_stop_seconds")),
         max_spot_source_spread_usd=float(_require(raw, "max_spot_source_spread_usd")),
+        model_weights={
+            str(key): float(value)
+            for key, value in dict(_optional(raw, "model_weights", {})).items()
+        },
+        market_prior_weight=float(_optional(raw, "market_prior_weight", 0.25)),
+        disagreement_shrink=float(_optional(raw, "disagreement_shrink", 0.25)),
         simulate_execution_latency=bool(_optional(raw, "simulate_execution_latency", True)),
         execution_order_type=str(_optional(raw, "execution_order_type", "FOK")).upper(),
         execution_max_slippage_ticks=int(_optional(raw, "execution_max_slippage_ticks", 1)),

@@ -49,7 +49,8 @@ PnL.
 A trade is eligible only when:
 
 - Enough models produce probabilities.
-- A strict majority points to the same side.
+- A strict weighted majority points to the same side, using the configured
+  calibration-first model weights.
 - Ensemble probability clears `min_confidence`.
 - Ensemble fair value exceeds the executable Polymarket price by `min_edge`.
 - The executable contract price is below `max_contract_entry_price`.
@@ -227,16 +228,19 @@ Do not promote to live trading until the paper ledger demonstrates:
 
 The first 263-trade paper ledger peaked early and then failed because the bot
 kept trading through a dead realized-PnL regime. The next longer ledger was
-positive, but its losses clustered in late-contract entries and very large
-model-market dislocations. The current config therefore uses:
+positive, but it showed that the real leak was model calibration: correlated
+short-horizon models could agree with each other while still being stale versus
+the live market. The current model stack therefore uses volatility-core weighted
+probability pooling, robust median/trimmed blending, orderbook-implied prior
+anchoring, and disagreement shrinkage before Kelly sizing sees a probability.
+
+The current risk config still uses:
 
 - `max_daily_drawdown_usd`: 100
 - `max_consecutive_losses`: 6
 - `max_entries_per_market`: 2
 - `max_contract_entry_price`: 0.60
-- `max_edge`: 0.20
-- `max_seconds_after_market_start`: 210
 
 These are not proof of alpha. They are guardrails against observed failures:
-uncalibrated probability forecasts, stale-looking apparent bargains, and entries
-too close to the end of a five-minute binary contract.
+uncalibrated probability forecasts, stale-looking apparent bargains, and
+execution drift between signal time and simulated fill time.
