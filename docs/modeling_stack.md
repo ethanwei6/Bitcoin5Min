@@ -61,6 +61,16 @@ The weights are deliberately modest. They express current research judgment
 about correlated short-horizon models and should be re-estimated from a larger
 walk-forward paper ledger before any real-money promotion.
 
+## Research Principle
+
+The objective is not to make the trader look good by filtering out bad model
+outputs. The objective is to build probabilities accurate enough that repeated
+Kelly-sized paper trades have positive expectancy after fees and realistic
+execution latency. When the paper trader loses money, the first response should
+be to improve model specification, calibration, regime awareness, and model
+weights. Hard caps belong to production risk management, not to the default
+research loop.
+
 ## Underlying-price backtests
 
 Use `scripts/backtest_models.py` when the research question is model quality,

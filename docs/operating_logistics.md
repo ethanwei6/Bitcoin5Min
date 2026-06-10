@@ -51,14 +51,14 @@ A trade is eligible only when:
 - Enough models produce probabilities.
 - A strict weighted majority points to the same side, using the configured
   calibration-first model weights.
-- Ensemble probability clears `min_confidence`.
-- Ensemble fair value exceeds the executable Polymarket price by `min_edge`.
-- The executable contract price is below `max_contract_entry_price`.
-- The current market has fewer than `max_entries_per_market` entries.
-- Daily realized PnL, daily drawdown, and consecutive-loss limits have not
-  tripped.
+- Configured confidence and edge thresholds clear. In the default model-first
+  research config both are set to `0`, so positive Kelly spend after fees is
+  the effective edge test.
+- Optional risk brakes have not tripped. These are disabled with `0` in the
+  default research config, including per-market entry caps, max trade size,
+  per-market exposure, daily loss, drawdown, and consecutive-loss limits.
 - The market is not too close to start or resolution.
-- Daily loss, per-market exposure, and cash limits are respected.
+- Available cash and top-of-book liquidity can support the Kelly-sized order.
 
 ## Kelly sizing
 
@@ -69,8 +69,10 @@ full Kelly fraction of bankroll to spend is:
 f = (p - c) / (1 - c)
 ```
 
-The bot uses fractional Kelly (`kelly_fraction`) and caps the resulting order
-by max trade size, cash, market exposure, and orderbook top-of-book size.
+The default research config uses full Kelly (`kelly_fraction: 1.0`) and caps
+the resulting order only by available cash and orderbook top-of-book size.
+Optional `max_trade_usd` and `max_position_usd_per_market` limits can be turned
+back on for production-style risk testing by setting them above `0`.
 
 ## Execution simulation
 
@@ -132,8 +134,8 @@ Concrete setup:
 3. Start with `--once` to verify API access.
 4. Install the `systemd` service below.
 5. Check `signals.jsonl` and `official_settlements.jsonl` daily.
-6. After 2-4 weeks, evaluate model-level calibration and PnL before changing
-   risk caps.
+6. After 2-4 weeks, evaluate model-level calibration and PnL, then change model
+   weights or model definitions before considering production-style risk caps.
 
 Suggested `systemd` unit:
 
@@ -234,13 +236,9 @@ the live market. The current model stack therefore uses volatility-core weighted
 probability pooling, robust median/trimmed blending, orderbook-implied prior
 anchoring, and disagreement shrinkage before Kelly sizing sees a probability.
 
-The current risk config still uses:
-
-- `max_daily_drawdown_usd`: 100
-- `max_consecutive_losses`: 6
-- `max_entries_per_market`: 2
-- `max_contract_entry_price`: 0.60
-
-These are not proof of alpha. They are guardrails against observed failures:
-uncalibrated probability forecasts, stale-looking apparent bargains, and
-execution drift between signal time and simulated fill time.
+The current research config disables the old hard brakes by setting them to
+`0`, sets `max_contract_entry_price` to `1.0`, uses full Kelly, and sets
+`min_edge` to `0.0`. That means repeated entries are allowed whenever the
+weighted model stack still sees positive post-fee edge. These are not proof of
+alpha; they are a cleaner way to test whether the model estimates themselves
+are good enough before adding production-style risk brakes back in.

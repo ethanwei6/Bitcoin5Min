@@ -57,10 +57,12 @@ research loop.
 The current implementation now includes:
 
 - Daily PnL and drawdown calculation from paired trades and settlements.
-- Drawdown kill switch via `max_daily_drawdown_usd`.
-- Consecutive-loss kill switch via `max_consecutive_losses`.
-- Per-market entry cap via `max_entries_per_market`.
-- Contract entry price cap via `max_contract_entry_price`.
+- Optional drawdown, consecutive-loss, per-market entry, max-trade, and
+  per-market exposure brakes. The default research config disables these with
+  `0` so model quality is tested directly before production-style brakes are
+  added back.
+- `max_contract_entry_price` can be used as a price cap, but the research
+  config sets it to `1.0` to avoid an arbitrary price cutoff.
 - Calibrated ensemble aggregation with volatility-core weighted probability pooling.
 - Market-prior anchoring from the live Up/Down order books.
 - Disagreement shrinkage when model probabilities are dispersed.
@@ -78,7 +80,8 @@ market." The more realistic hypothesis is narrower:
 - There may be short time windows where Polymarket's five-minute crypto markets
   lag realized spot movement.
 - The strategy needs to avoid paying up for already-consensus contracts.
-- Risk controls should stop trading after realized calibration turns bad.
+- Model weights and calibration should adapt when realized probabilities turn
+  out to be stale or regime-dependent.
 - Evaluation should focus on net PnL after taker fees, marketable-order delay,
   fill slippage, and official-resolution basis.
 

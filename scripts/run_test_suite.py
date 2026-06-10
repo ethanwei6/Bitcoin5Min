@@ -4,6 +4,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import test_bot_drain
+import test_config
 import test_execution
 import test_market
 import test_models
@@ -11,10 +12,12 @@ import test_risk
 
 
 def main() -> None:
+    test_config.test_default_config_is_model_first_full_kelly_research_mode()
     test_risk.test_fee_per_share_matches_protocol_shape()
     test_risk.test_kelly_fraction_positive_only_when_probability_beats_cost()
     test_risk.test_risk_engine_trades_when_majority_edge_and_caps_pass()
     test_risk.test_risk_engine_uses_weighted_majority_for_side()
+    test_risk.test_zero_market_entry_and_position_caps_disable_hard_limits()
     test_risk.test_risk_engine_rejects_after_daily_drawdown_limit()
     test_risk.test_risk_engine_rejects_expensive_contracts()
     test_risk.test_risk_engine_rejects_late_contract_entries()

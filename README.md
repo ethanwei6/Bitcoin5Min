@@ -5,7 +5,7 @@ five-minute Up/Down markets.
 
 The project continuously discovers the active BTC 5m market, polls live
 Polymarket CLOB books and exchange spot feeds, runs an online ensemble of
-short-horizon price models, sizes eligible trades with fractional Kelly, and
+short-horizon price models, sizes eligible trades with Kelly, and
 journals every signal, paper execution, fill, settlement, and postmortem.
 
 This is a paper-trading and research system only. It does not sign orders, post
@@ -33,8 +33,8 @@ This repo is designed around those questions.
   GARCH(1,1), GJR threshold-GARCH, Student-t GARCH, regime-switching
   volatility, HAR realized volatility, empirical interval KNN, Merton
   jump-diffusion, Kalman-style local trend, and orderbook imbalance signals.
-- Weighted-majority model gate plus edge, confidence, price, exposure,
-  drawdown, and consecutive-loss risk controls.
+- Weighted-majority model gate plus edge, confidence, Kelly sizing,
+  refreshed-book execution checks, and optional opt-in risk brakes.
 - Paper CLOB execution simulator that rechecks the live order book, honors
   market-specific `itode` taker delay metadata, applies FOK/FAK fill logic, and
   records latency/slippage/rejection evidence.
@@ -69,7 +69,7 @@ Core package: `src/poly_5m_bot/`
 - `market.py`: active BTC 5m market discovery.
 - `spot.py`: exchange quote aggregation and quality checks.
 - `models.py`: online forecasting ensemble.
-- `risk.py`: majority, edge, Kelly, and drawdown controls.
+- `risk.py`: weighted majority, edge, Kelly sizing, and optional risk brakes.
 - `execution.py`: paper CLOB execution simulator.
 - `paper.py`: durable cash/position ledger.
 - `bot.py`: continuous runner and drain-mode shutdown behavior.
@@ -164,7 +164,7 @@ risk engine, the simulator:
 
 This mirrors the pre-submit execution path while remaining paper-only.
 
-## Risk Controls
+## Model-First Research Mode
 
 The first long paper run peaked early and then failed because the strategy kept
 trading after the realized PnL regime flipped. The next run was profitable but
@@ -177,17 +177,22 @@ current default emphasizes probability calibration over hard filtering:
 - live orderbook-implied probability as a market prior
 - disagreement-based shrinkage toward 50/50 when the model stack is unstable
 
-The risk layer remains conservative:
+The default research config avoids arbitrary hard strategy filters. A value of
+`0` disables optional brakes such as max trade size, per-market exposure, daily
+loss, drawdown, consecutive-loss, and per-market entry caps. It also uses
+full-Kelly sizing (`kelly_fraction: 1.0`) and `min_edge: 0.0`, so a trade is
+funded only when the model probability beats the executable cost after fees.
+The live decision is therefore driven by model probability, weighted majority,
+available cash, top-of-book liquidity, and Kelly sizing.
 
-- `max_daily_drawdown_usd`: 100
-- `max_consecutive_losses`: 6
-- `max_entries_per_market`: 2
-- `max_contract_entry_price`: 0.60
-- `max_trade_usd`: 25
-- `kelly_fraction`: 0.25
+Operational guards remain in place for data integrity: the bot still requires
+enough models, a captured interval start, positive Kelly spend after fees, and
+enough time before resolution for the execution simulation to be meaningful.
 
-The point is not to claim alpha from one run. The point is to make every failure
-measurable, then encode the lessons into the next shadow-trading iteration.
+The point is not to claim alpha from one run or rescue weak predictions with
+filters. The point is to make every failure measurable, then improve the model
+stack, calibration, and weights until the full-Kelly paper strategy has
+repeatable positive expectancy.
 
 ## Documentation
 

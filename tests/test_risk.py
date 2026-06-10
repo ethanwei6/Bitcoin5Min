@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 from poly_5m_bot.config import BotConfig, PolymarketConfig
@@ -140,6 +141,51 @@ def test_risk_engine_uses_weighted_majority_for_side() -> None:
     assert decision.should_trade
     assert decision.side == "DOWN"
     assert decision.probability == 0.63
+
+
+def test_zero_market_entry_and_position_caps_disable_hard_limits() -> None:
+    forecasts = [
+        ModelForecast("a", 0.72, 101.0, 0.44, "x"),
+        ModelForecast("b", 0.70, 101.0, 0.40, "x"),
+        ModelForecast("c", 0.68, 101.0, 0.36, "x"),
+        ModelForecast("d", 0.66, 101.0, 0.32, "x"),
+    ]
+    ensemble = EnsembleForecast(
+        p_up=0.69,
+        expected_end_price=100.5,
+        confidence=0.38,
+        forecasts=forecasts,
+        majority_side="UP",
+        majority_count=4,
+        majority_weight=4.0,
+        total_weight=4.0,
+    )
+    config = replace(
+        make_config(),
+        max_entries_per_market=0,
+        max_position_usd_per_market=0.0,
+        max_trade_usd=0.0,
+        max_daily_loss_usd=0.0,
+        max_daily_drawdown_usd=0.0,
+        max_consecutive_losses=0,
+        max_contract_entry_price=1.0,
+    )
+    decision = RiskEngine(config).decide(
+        forecast=ensemble,
+        up_book=make_book(0.50),
+        down_book=make_book(0.50),
+        cash_usd=1000.0,
+        market_exposure_usd=500.0,
+        market_entries=99,
+        daily_pnl_usd=-500.0,
+        daily_drawdown_usd=500.0,
+        consecutive_losses=99,
+        seconds_from_start=30.0,
+        seconds_to_end=120.0,
+    )
+    assert decision.should_trade
+    assert decision.side == "UP"
+    assert decision.spend_usd > 25.0
 
 
 def test_risk_engine_rejects_after_daily_drawdown_limit() -> None:
