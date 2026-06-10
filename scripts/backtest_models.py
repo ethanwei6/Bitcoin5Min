@@ -164,6 +164,8 @@ def fetch_candles(
 
 
 def interval_ms(interval: str) -> int:
+    if interval.endswith("s"):
+        return int(interval[:-1]) * 1_000
     if interval.endswith("m"):
         return int(interval[:-1]) * 60_000
     raise ValueError(f"Unsupported interval: {interval}")
@@ -171,6 +173,17 @@ def interval_ms(interval: str) -> int:
 
 def price_by_second(candles: list[Candle]) -> dict[int, float]:
     return {candle.open_time_ms // 1000: candle.open for candle in candles}
+
+
+def infer_sample_seconds(candles: list[Candle]) -> float:
+    if len(candles) < 2:
+        return 60.0
+    deltas = [
+        (right.open_time_ms - left.open_time_ms) / 1000.0
+        for left, right in zip(candles, candles[1:])
+        if right.open_time_ms > left.open_time_ms
+    ]
+    return statistics.median(deltas) if deltas else 60.0
 
 
 def log_loss(probability: float, outcome_up: float) -> float:
@@ -190,6 +203,44 @@ def expected_calibration_error(rows: list[dict[str, Any]]) -> float | None:
         avg_y = statistics.fmean(row["outcome_up"] for row in bucket_rows)
         ece += len(bucket_rows) / len(rows) * abs(avg_p - avg_y)
     return ece
+
+
+def time_bucket(seconds_from_start: float) -> str:
+    seconds = float(seconds_from_start)
+    if seconds < 30:
+        return "000-030s"
+    if seconds < 60:
+        return "030-060s"
+    if seconds < 120:
+        return "060-120s"
+    if seconds < 180:
+        return "120-180s"
+    if seconds < 240:
+        return "180-240s"
+    return "240-300s"
+
+
+def confidence_bucket(probability: float) -> str:
+    p_win = max(float(probability), 1.0 - float(probability))
+    if p_win < 0.55:
+        return "50-55%"
+    if p_win < 0.60:
+        return "55-60%"
+    if p_win < 0.65:
+        return "60-65%"
+    if p_win < 0.70:
+        return "65-70%"
+    if p_win < 0.75:
+        return "70-75%"
+    if p_win < 0.80:
+        return "75-80%"
+    return "80-100%"
+
+
+def side_won(row: dict[str, Any]) -> bool:
+    p_up = float(row["p_up"])
+    outcome_up = float(row["outcome_up"])
+    return (p_up >= 0.5 and outcome_up == 1.0) or (p_up < 0.5 and outcome_up == 0.0)
 
 
 def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
@@ -233,6 +284,127 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
             else None
         ),
     }
+
+
+def train_test_split_rows(
+    rows: list[dict[str, Any]],
+    train_fraction: float,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    ordered = sorted(rows, key=lambda row: (int(row["timestamp"]), str(row["asset"])))
+    if len(ordered) < 2:
+        return ordered, []
+    split = int(len(ordered) * train_fraction)
+    split = min(max(split, 1), len(ordered) - 1)
+    return ordered[:split], ordered[split:]
+
+
+def bucket_win_rate(
+    rows: list[dict[str, Any]],
+    *,
+    min_bucket_count: int,
+) -> tuple[dict[tuple[str, str], dict[str, float]], dict[str, float]]:
+    buckets: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
+    time_buckets: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        t_bucket = time_bucket(float(row["seconds_from_start"]))
+        c_bucket = confidence_bucket(float(row["p_up"]))
+        buckets[(t_bucket, c_bucket)].append(row)
+        time_buckets[t_bucket].append(row)
+    global_rate = statistics.fmean(1.0 if side_won(row) else 0.0 for row in rows) if rows else 0.5
+    calibrated: dict[tuple[str, str], dict[str, float]] = {}
+    for key, bucket_rows in buckets.items():
+        if len(bucket_rows) < min_bucket_count:
+            continue
+        calibrated[key] = {
+            "count": len(bucket_rows),
+            "avg_model_confidence": statistics.fmean(max(row["p_up"], 1.0 - row["p_up"]) for row in bucket_rows),
+            "actual_win_rate": statistics.fmean(1.0 if side_won(row) else 0.0 for row in bucket_rows),
+        }
+    fallback_by_time = {
+        key: statistics.fmean(1.0 if side_won(row) else 0.0 for row in bucket_rows)
+        for key, bucket_rows in time_buckets.items()
+        if len(bucket_rows) >= min_bucket_count
+    }
+    fallback_by_time["__global__"] = global_rate
+    return calibrated, fallback_by_time
+
+
+def apply_confidence_calibration(
+    rows: list[dict[str, Any]],
+    calibration: dict[tuple[str, str], dict[str, float]],
+    fallback_by_time: dict[str, float],
+) -> list[dict[str, Any]]:
+    calibrated_rows = []
+    global_rate = fallback_by_time.get("__global__", 0.5)
+    for row in rows:
+        t_bucket = time_bucket(float(row["seconds_from_start"]))
+        c_bucket = confidence_bucket(float(row["p_up"]))
+        win_rate = calibration.get((t_bucket, c_bucket), {}).get(
+            "actual_win_rate",
+            fallback_by_time.get(t_bucket, global_rate),
+        )
+        calibrated_p_up = win_rate if float(row["p_up"]) >= 0.5 else 1.0 - win_rate
+        updated = dict(row)
+        updated["raw_p_up"] = row["p_up"]
+        updated["p_up"] = max(0.01, min(0.99, calibrated_p_up))
+        calibrated_rows.append(updated)
+    return calibrated_rows
+
+
+def reliability_table(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    buckets: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        buckets[
+            (
+                time_bucket(float(row["seconds_from_start"])),
+                confidence_bucket(float(row["p_up"])),
+            )
+        ].append(row)
+    table = []
+    for (t_bucket, c_bucket), bucket_rows in sorted(buckets.items()):
+        table.append(
+            {
+                "time_bucket": t_bucket,
+                "confidence_bucket": c_bucket,
+                "count": len(bucket_rows),
+                "avg_model_confidence": statistics.fmean(max(row["p_up"], 1.0 - row["p_up"]) for row in bucket_rows),
+                "actual_win_rate": statistics.fmean(1.0 if side_won(row) else 0.0 for row in bucket_rows),
+            }
+        )
+    return table
+
+
+def train_test_calibration_report(
+    model_rows: dict[str, list[dict[str, Any]]],
+    *,
+    train_fraction: float,
+    min_bucket_count: int,
+) -> dict[str, Any]:
+    report = {}
+    for name, rows in sorted(model_rows.items()):
+        if len(rows) < max(100, min_bucket_count * 2):
+            continue
+        train_rows, test_rows = train_test_split_rows(rows, train_fraction)
+        calibration, fallback_by_time = bucket_win_rate(
+            train_rows,
+            min_bucket_count=min_bucket_count,
+        )
+        calibrated_test_rows = apply_confidence_calibration(
+            test_rows,
+            calibration,
+            fallback_by_time,
+        )
+        report[name] = {
+            "train_count": len(train_rows),
+            "test_count": len(test_rows),
+            "raw_test": summarize(test_rows),
+            "calibrated_test": summarize(calibrated_test_rows),
+            "train_reliability": reliability_table(train_rows),
+            "test_reliability": reliability_table(test_rows),
+            "calibration_bucket_count": len(calibration),
+            "min_bucket_count": min_bucket_count,
+        }
+    return report
 
 
 def proxy_effective_cost(entry_price: float, fee_rate: float) -> float:
@@ -392,7 +564,14 @@ def replay_asset(
     confidence_threshold: float,
 ) -> dict[str, Any]:
     prices = price_by_second(candles)
-    window = RollingPriceWindow(max_start_capture_lag_seconds=65)
+    sample_seconds = infer_sample_seconds(candles)
+    window = RollingPriceWindow(
+        maxlen=min(
+            max(len(candles), 900),
+            max(900, int(12 * 60 * 60 / max(sample_seconds, 1.0)) + 300),
+        ),
+        max_start_capture_lag_seconds=max(65, int(sample_seconds * 2)),
+    )
     ensemble = Ensemble()
     model_rows: dict[str, list[dict[str, Any]]] = defaultdict(list)
     intervals = 0
@@ -539,6 +718,69 @@ def markdown(report: dict[str, Any]) -> str:
                 row["proxy_net_pnl_units"],
             )
         )
+    lines.extend(
+        [
+            "",
+            "## Real-Price Train/Test Confidence Calibration",
+            "",
+            f"Train fraction: `{report['train_fraction']:.2f}`. Minimum bucket count: `{report['min_calibration_bucket_count']}`.",
+            "",
+            "| Model | Train | Test | Raw Test Brier | Calibrated Test Brier | Raw Test ECE | Calibrated Test ECE | Bucket Count |",
+            "|---|---:|---:|---:|---:|---:|---:|---:|",
+        ]
+    )
+    for name, row in sorted(
+        report["train_test_calibration"].items(),
+        key=lambda item: item[1]["calibrated_test"]["brier"] if item[1]["calibrated_test"]["brier"] is not None else 999,
+    ):
+        raw = row["raw_test"]
+        calibrated = row["calibrated_test"]
+        lines.append(
+            "| `{}` | {} | {} | {} | {} | {} | {} | {} |".format(
+                name,
+                row["train_count"],
+                row["test_count"],
+                f"{raw['brier']:.4f}" if raw["brier"] is not None else "",
+                f"{calibrated['brier']:.4f}" if calibrated["brier"] is not None else "",
+                f"{raw['ece']:.4f}" if raw["ece"] is not None else "",
+                f"{calibrated['ece']:.4f}" if calibrated["ece"] is not None else "",
+                row["calibration_bucket_count"],
+            )
+        )
+    lines.extend(
+        [
+            "",
+            "### Selected Test Reliability Buckets",
+            "",
+            "Rows show how often the predicted side actually won on the held-out test window.",
+            "",
+            "| Model | Time From Start | Confidence | Count | Avg Model Confidence | Actual Win Rate |",
+            "|---|---|---|---:|---:|---:|",
+        ]
+    )
+    for name, row in sorted(report["train_test_calibration"].items()):
+        selected = [
+            bucket for bucket in row["test_reliability"]
+            if bucket["count"] >= report["min_calibration_bucket_count"]
+        ]
+        selected = sorted(
+            selected,
+            key=lambda bucket: (
+                bucket["time_bucket"],
+                -abs(bucket["avg_model_confidence"] - bucket["actual_win_rate"]),
+            ),
+        )[:8]
+        for bucket in selected:
+            lines.append(
+                "| `{}` | `{}` | `{}` | {} | {:.3f} | {:.3f} |".format(
+                    name,
+                    bucket["time_bucket"],
+                    bucket["confidence_bucket"],
+                    bucket["count"],
+                    bucket["avg_model_confidence"],
+                    bucket["actual_win_rate"],
+                )
+            )
     return "\n".join(lines) + "\n"
 
 
@@ -551,6 +793,8 @@ def main() -> None:
     parser.add_argument("--entry-price", type=float, default=0.50)
     parser.add_argument("--min-edge", type=float, default=0.04)
     parser.add_argument("--fee-rate", type=float, default=0.07)
+    parser.add_argument("--train-fraction", type=float, default=0.70)
+    parser.add_argument("--min-calibration-bucket-count", type=int, default=30)
     parser.add_argument("--reports-dir", default="reports/model_backtests")
     args = parser.parse_args()
 
@@ -587,6 +831,11 @@ def main() -> None:
         for name, weights in candidate_weight_profiles(recommended).items()
         if weights
     }
+    calibration = train_test_calibration_report(
+        combined_rows,
+        train_fraction=args.train_fraction,
+        min_bucket_count=args.min_calibration_bucket_count,
+    )
     report = {
         "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "days": args.days,
@@ -595,10 +844,13 @@ def main() -> None:
         "entry_price": args.entry_price,
         "min_edge": args.min_edge,
         "fee_rate": args.fee_rate,
+        "train_fraction": args.train_fraction,
+        "min_calibration_bucket_count": args.min_calibration_bucket_count,
         "assets": assets,
         "combined_models": {name: summarize(rows) for name, rows in sorted(combined_rows.items())},
         "recommended_weights": recommended,
         "weight_profiles": profiles,
+        "train_test_calibration": calibration,
     }
     reports_dir = Path(args.reports_dir)
     reports_dir.mkdir(parents=True, exist_ok=True)

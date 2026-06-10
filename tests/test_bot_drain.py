@@ -37,6 +37,8 @@ def make_config(output_dir: Path) -> BotConfig:
         model_weights={},
         market_prior_weight=0.25,
         disagreement_shrink=0.25,
+        horizon_confidence_min_multiplier=0.25,
+        horizon_confidence_power=0.65,
         simulate_execution_latency=True,
         execution_order_type="FOK",
         execution_max_slippage_ticks=1,

@@ -40,6 +40,9 @@ class EnsembleForecast:
     majority_count: int
     majority_weight: float = 0.0
     total_weight: float = 0.0
+    raw_p_up: float = 0.5
+    market_prior_p_up: float | None = None
+    horizon_confidence_multiplier: float = 1.0
 
 
 @dataclass(frozen=True)
@@ -129,6 +132,21 @@ def market_implied_up_probability(
     if up_mid is None or down_mid is None or up_mid + down_mid <= 0:
         return None
     return clamp(up_mid / (up_mid + down_mid), 0.01, 0.99)
+
+
+def horizon_confidence_multiplier(
+    observation: PriceObservation,
+    *,
+    min_multiplier: float,
+    power: float,
+) -> float:
+    interval_seconds = max(observation.market_end_epoch - observation.market_start_epoch, 1.0)
+    seconds_from_start = clamp(observation.timestamp - observation.market_start_epoch, 0.0, interval_seconds)
+    elapsed_fraction = seconds_from_start / interval_seconds
+    floor = clamp(min_multiplier, 0.0, 1.0)
+    exponent = max(power, 0.01)
+    information_fraction = elapsed_fraction**exponent
+    return clamp(floor + (1.0 - floor) * information_fraction, floor, 1.0)
 
 
 def trimmed_mean(values: list[float]) -> float:
@@ -710,6 +728,8 @@ class Ensemble:
         model_weights: dict[str, float] | None = None,
         market_prior_weight: float = 0.25,
         disagreement_shrink: float = 0.25,
+        horizon_confidence_min_multiplier: float = 0.25,
+        horizon_confidence_power: float = 0.65,
     ):
         self.models = models or [
             DistanceToStartModel(),
@@ -730,6 +750,8 @@ class Ensemble:
         self.model_weights = model_weights or self.default_model_weights
         self.market_prior_weight = clamp(market_prior_weight, 0.0, 1.0)
         self.disagreement_shrink = max(0.0, disagreement_shrink)
+        self.horizon_confidence_min_multiplier = clamp(horizon_confidence_min_multiplier, 0.0, 1.0)
+        self.horizon_confidence_power = max(horizon_confidence_power, 0.01)
 
     def forecast(
         self,
@@ -770,7 +792,18 @@ class Ensemble:
             + 0.35 * model_market_gap
         )
         shrink = clamp(calibration_shrink, 0.08, 0.35)
-        p_up = clamp(0.5 + (anchored_p_up - 0.5) * (1.0 - shrink), 0.01, 0.99)
+        raw_p_up = clamp(0.5 + (anchored_p_up - 0.5) * (1.0 - shrink), 0.01, 0.99)
+        horizon_multiplier = horizon_confidence_multiplier(
+            observation,
+            min_multiplier=self.horizon_confidence_min_multiplier,
+            power=self.horizon_confidence_power,
+        )
+        horizon_target = 0.5
+        p_up = clamp(
+            horizon_target + (raw_p_up - horizon_target) * horizon_multiplier,
+            0.01,
+            0.99,
+        )
         expected = sum(
             weight * item.expected_end_price for weight, item in zip(weights, forecasts)
         ) / weight_total
@@ -792,4 +825,7 @@ class Ensemble:
             majority_count=majority_count,
             majority_weight=majority_weight,
             total_weight=weight_total,
+            raw_p_up=raw_p_up,
+            market_prior_p_up=market_prior,
+            horizon_confidence_multiplier=horizon_multiplier,
         )

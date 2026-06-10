@@ -201,3 +201,43 @@ def test_ensemble_calibrates_large_model_market_dislocation() -> None:
     assert forecast is not None
     assert forecast.p_up < 0.70
     assert forecast.p_up > 0.50
+
+
+def test_ensemble_shrinks_early_interval_confidence_by_horizon() -> None:
+    early_observation = PriceObservation(
+        timestamp=1015,
+        market_start_epoch=1000,
+        market_end_epoch=1300,
+        spot_price=100.0,
+    )
+    late_observation = PriceObservation(
+        timestamp=1210,
+        market_start_epoch=1000,
+        market_end_epoch=1300,
+        spot_price=100.0,
+    )
+    ensemble = Ensemble(
+        models=[
+            StaticModel("a", 0.90),
+            StaticModel("b", 0.88),
+            StaticModel("c", 0.86),
+            StaticModel("d", 0.84),
+        ],
+        market_prior_weight=0.35,
+        disagreement_shrink=0.85,
+        horizon_confidence_min_multiplier=0.25,
+        horizon_confidence_power=0.65,
+    )
+    up_book = make_book(0.49, 0.51)
+    down_book = make_book(0.49, 0.51)
+
+    early = ensemble.forecast(RollingPriceWindow(), early_observation, up_book, down_book)
+    late = ensemble.forecast(RollingPriceWindow(), late_observation, up_book, down_book)
+
+    assert early is not None
+    assert late is not None
+    assert early.p_up > 0.50
+    assert late.p_up > early.p_up
+    assert early.horizon_confidence_multiplier < late.horizon_confidence_multiplier
+    assert early.raw_p_up == late.raw_p_up
+    assert early.market_prior_p_up == late.market_prior_p_up

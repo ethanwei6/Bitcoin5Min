@@ -11,6 +11,8 @@ def test_default_config_is_model_first_fractional_kelly_research_mode() -> None:
     assert config.kelly_fraction == 0.25
     assert config.market_prior_weight == 0.35
     assert config.disagreement_shrink == 0.85
+    assert config.horizon_confidence_min_multiplier == 0.25
+    assert config.horizon_confidence_power == 0.65
     assert config.min_edge == 0.0
     assert config.min_confidence == 0.0
     assert config.max_trade_usd == 0.0

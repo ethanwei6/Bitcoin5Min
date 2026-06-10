@@ -4,6 +4,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import test_bot_drain
+import test_backtest_models
 import test_config
 import test_execution
 import test_market
@@ -12,6 +13,9 @@ import test_risk
 
 
 def main() -> None:
+    test_backtest_models.test_interval_ms_supports_second_and_minute_candles()
+    test_backtest_models.test_train_test_split_is_chronological_before_asset_name()
+    test_backtest_models.test_confidence_calibration_preserves_probability_side()
     test_config.test_default_config_is_model_first_fractional_kelly_research_mode()
     test_risk.test_fee_per_share_matches_protocol_shape()
     test_risk.test_kelly_fraction_positive_only_when_probability_beats_cost()

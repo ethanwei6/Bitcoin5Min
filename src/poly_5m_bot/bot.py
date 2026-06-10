@@ -45,6 +45,8 @@ class PaperTradingBot:
             model_weights=config.model_weights or None,
             market_prior_weight=config.market_prior_weight,
             disagreement_shrink=config.disagreement_shrink,
+            horizon_confidence_min_multiplier=config.horizon_confidence_min_multiplier,
+            horizon_confidence_power=config.horizon_confidence_power,
         )
         self.risk = RiskEngine(config)
         self.execution = PaperExecutionSimulator(

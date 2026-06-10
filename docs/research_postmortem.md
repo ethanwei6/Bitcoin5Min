@@ -66,8 +66,13 @@ The current implementation now includes:
 - Calibrated ensemble aggregation with volatility-core weighted probability pooling.
 - Market-prior anchoring from the live Up/Down order books.
 - Disagreement shrinkage when model probabilities are dispersed.
+- Horizon-confidence shrinkage so early-interval signals are less confident
+  than otherwise identical near-resolution signals.
 - `scripts/backtest_models.py` for underlying-price model validation across
   current Polymarket 5M crypto assets.
+- Chronological train/test reliability buckets from real crypto candles, so
+  reported model confidence can be compared with held-out win rates by market
+  age.
 - Post-execution risk check before a simulated fill is recorded as a paper trade.
 - Clean output-directory override for separate strategy iterations.
 - `scripts/analyze_paper_run.py` for repeatable postmortem generation.
@@ -86,4 +91,5 @@ market." The more realistic hypothesis is narrower:
   fill slippage, and official-resolution basis.
 
 The next research step is another clean paper ledger using the underlying-tested
-volatility-core ensemble, not live trading.
+volatility-core ensemble plus longer real-price confidence calibration, not live
+trading.

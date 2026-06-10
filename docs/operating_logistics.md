@@ -4,9 +4,9 @@
 
 Polymarket's BTC 5m markets are binary Up/Down contracts. The relevant market
 question is whether BTC finishes the interval greater than or equal to the
-start price. The market page and rules point to Chainlink BTC/USD as the
-resolution source, so any exchange-based spot feed is only a proxy. That basis
-risk is part of the paper test and should be measured explicitly.
+start price. Exchange-based spot feeds are proxies for the official Polymarket
+resolution source, so settlement-source basis risk is part of the paper test
+and should be measured explicitly.
 
 ## Data path
 
@@ -15,8 +15,8 @@ risk is part of the paper test and should be measured explicitly.
 2. Fetch Gamma event metadata and extract the tradable market, outcomes, token
    IDs, start/end time, and CLOB fields.
 3. Fetch CLOB order books for Up and Down token IDs.
-4. Fetch BTC spot from Coinbase, Binance US, and Kraken, then use the median
-   valid price as the primary spot proxy.
+4. Fetch BTC spot from Coinbase, Binance US, Kraken, and Gemini, then use the
+   median valid price as the primary spot proxy.
 5. Persist every snapshot before creating a signal.
 6. If the signal passes risk gates, create a paper CLOB BUY intent and re-fetch
    the current CLOB book before filling. This recheck measures actual request
@@ -43,6 +43,13 @@ approximations of established econometric price and volatility models:
 The bot records individual model probabilities so the evidence report can score
 calibration and direction accuracy per model rather than only reporting blended
 PnL.
+
+Model accuracy should be judged from real underlying crypto prices, not from
+unit-test fixtures or from the bot's own trade logs. Use
+`scripts/backtest_models.py` for chronological train/test calibration on real
+exchange candles. The default `1m` candle interval is adequate for broad
+cross-asset scans; `1s` candles are supported for BTC-style market-age studies
+but are slower and should be run as offline research jobs.
 
 ## Decision gate
 
@@ -226,6 +233,8 @@ Do not promote to live trading until the paper ledger demonstrates:
 - Zero entry-audit failures for captured top-of-book fills.
 - Low rejected-intent rate after refreshed-book execution simulation.
 - Calibration that is good enough to justify Kelly sizing, not just lucky PnL.
+- Held-out real-price reliability showing that reported model confidence is
+  close to actual win frequency by market-age bucket.
 - Positive PnL under 1c, 2c, and 3c adverse-fill stress tests.
 
 ## Current risk lessons
@@ -236,8 +245,8 @@ positive, but it showed that the real leak was model calibration: correlated
 short-horizon models could agree with each other while still being stale versus
 the live market. The current model stack therefore uses volatility-core weighted
 probability pooling, robust median/trimmed blending, orderbook-implied prior
-anchoring, disagreement shrinkage, and model-market gap shrinkage before Kelly
-sizing sees a probability.
+anchoring, disagreement shrinkage, model-market gap shrinkage, and
+horizon-confidence shrinkage before Kelly sizing sees a probability.
 
 The current research config disables the old hard brakes by setting them to
 `0`, sets `max_contract_entry_price` to `1.0`, uses quarter Kelly, and sets

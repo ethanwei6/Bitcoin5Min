@@ -51,6 +51,8 @@ class BotConfig:
     model_weights: dict[str, float]
     market_prior_weight: float
     disagreement_shrink: float
+    horizon_confidence_min_multiplier: float
+    horizon_confidence_power: float
     simulate_execution_latency: bool
     execution_order_type: str
     execution_max_slippage_ticks: int
@@ -123,6 +125,10 @@ def load_config(path: str | Path) -> BotConfig:
         },
         market_prior_weight=float(_optional(raw, "market_prior_weight", 0.25)),
         disagreement_shrink=float(_optional(raw, "disagreement_shrink", 0.25)),
+        horizon_confidence_min_multiplier=float(
+            _optional(raw, "horizon_confidence_min_multiplier", 0.25)
+        ),
+        horizon_confidence_power=float(_optional(raw, "horizon_confidence_power", 0.65)),
         simulate_execution_latency=bool(_optional(raw, "simulate_execution_latency", True)),
         execution_order_type=str(_optional(raw, "execution_order_type", "FOK")).upper(),
         execution_max_slippage_ticks=int(_optional(raw, "execution_max_slippage_ticks", 1)),

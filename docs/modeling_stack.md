@@ -5,6 +5,11 @@ ensemble adds online approximations of well-known volatility, jump, and trend
 models that can update every few seconds without heavyweight numerical
 dependencies.
 
+These are online, dependency-light approximations of research-backed model
+families. They are not claimed to be state-of-the-art trained predictors. A
+model earns live ensemble weight only through walk-forward tests on real crypto
+prices and through paper-trading evidence.
+
 ## Models
 
 - `distance_to_start_random_walk`: baseline probability from current distance to
@@ -28,6 +33,25 @@ dependencies.
 - `polymarket_orderbook_imbalance`: market microstructure signal from Up/Down
   book depth. Treat this as market-awareness, not independent price discovery.
 
+## Research grounding
+
+The volatility models are grounded in established financial econometrics:
+
+- ARCH/GARCH-style conditional volatility traces back to Engle's ARCH work and
+  Bollerslev's GARCH generalization.
+- GJR/threshold-style terms are used to capture asymmetric volatility response.
+- HAR realized volatility follows the heterogeneous autoregressive realized
+  volatility idea associated with Corsi-style realized-volatility forecasting.
+- Jump-diffusion follows the Merton-style idea that returns can combine
+  continuous diffusion and discontinuous jumps.
+
+Deep sequence models such as DeepLOB, Temporal Fusion Transformer, N-BEATS,
+PatchTST, TiDE, and TimeMixer are relevant future research directions. They are
+not included in the live trader because this repo does not yet have a large
+walk-forward training set of BTC 5m terminal labels plus crypto order-book
+features. Adding them without that dataset would make the public repo look more
+impressive but would not make the trader more honest.
+
 ## Why online approximations
 
 The bot is built to paper trade continuously. Full MLE GARCH, stochastic
@@ -39,7 +63,8 @@ without:
 - calibration checks for probability forecasts,
 - latency measurement,
 - overfit controls by market regime and time of day,
-- settlement-source basis checks against Chainlink BTC/USD.
+- settlement-source basis checks against the official Polymarket resolution
+  source.
 
 The current implementation is a stronger research baseline, not proof of alpha.
 The right promotion path is to let it collect a few weeks of logs, then score
@@ -59,6 +84,9 @@ vote. It now combines probabilities through:
 - model-market gap shrinkage, because a model that claims 80-90% win
   probability against a much lower live market needs stronger empirical
   calibration before receiving Kelly-sized capital.
+- horizon confidence shrinkage, because forecasts made early in a five-minute
+  interval have more time to be wrong before resolution than forecasts made near
+  expiry.
 
 The weights are deliberately modest. They express current research judgment
 about correlated short-horizon models and should be re-estimated from a larger
@@ -77,17 +105,49 @@ research loop.
 ## Underlying-price backtests
 
 Use `scripts/backtest_models.py` when the research question is model quality,
-not bot execution quality. It fetches one-minute exchange candles for the
-current Polymarket 5M crypto universe:
+not bot execution quality. It fetches real exchange candles for the current
+Polymarket 5M crypto universe:
 
 - BTC, ETH, SOL, BNB, XRP, and DOGE from Binance spot klines.
 - HYPE from Hyperliquid candles.
 
-The 7-day cross-asset run on June 9, 2026 ranked the volatility-family models
-highest by Brier score: GJR threshold GARCH, GARCH(1,1), HAR realized
-volatility, and EWMA. A follow-up smoke run showed Student-t GARCH and
-regime-switching volatility in the same top calibration band, while empirical
-interval KNN was useful but weaker. The ensemble is therefore volatility-core
-weighted. Mean reversion, short momentum, KNN, and volatility fade remain
-available as auxiliary views, but they are not the center of the probability
-estimate.
+The default `--interval 1m` is useful for cross-asset scans. BTC-specific
+calibration can also use `--interval 1s`, which is slower but gives better
+coverage of first-30-second and market-age effects. Do not treat tiny `1s`
+smoke runs as accuracy evidence; they only verify the data path.
+
+The backtester now reports chronological train/test confidence calibration. It
+learns reliability buckets on the train window by model, market age, and
+reported confidence, then scores raw and calibrated probabilities on the
+held-out test window. This is the correct evidence source for answering "when a
+model says 70%, how often does it actually win?"
+
+Recent real BTC 7-day, 1-minute train/test evidence showed volatility-family
+models remained the most reliable raw predictors by Brier score, while simple
+bucket calibration helped weaker or overconfident models more than it helped
+already-calibrated volatility models. That means calibration tables should be
+used as diagnostics and model-weight inputs until longer walk-forward evidence
+justifies feeding them directly into Kelly sizing.
+
+## References
+
+- Engle, "Autoregressive Conditional Heteroskedasticity with Estimates of the
+  Variance of United Kingdom Inflation", Econometrica, 1982.
+- Bollerslev, "Generalized Autoregressive Conditional Heteroskedasticity",
+  Journal of Econometrics, 1986. DOI:
+  `10.1016/0304-4076(86)90063-1`.
+- Glosten, Jagannathan, and Runkle, "On the Relation between the Expected Value
+  and the Volatility of the Nominal Excess Return on Stocks", Journal of
+  Finance, 1993.
+- Corsi, "A Simple Approximate Long-Memory Model of Realized Volatility",
+  Journal of Financial Econometrics, 2009.
+- Merton, "Option Pricing When Underlying Stock Returns Are Discontinuous",
+  Journal of Financial Economics, 1976.
+- Zhang, Zohren, and Roberts, "DeepLOB: Deep Convolutional Neural Networks for
+  Limit Order Books", arXiv: `1808.03668`.
+- Lim et al., "Temporal Fusion Transformers for Interpretable Multi-horizon
+  Time Series Forecasting", arXiv: `1912.09363`.
+- Oreshkin et al., "N-BEATS: Neural basis expansion analysis for interpretable
+  time series forecasting", arXiv: `1905.10437`.
+- Nie et al., "A Time Series is Worth 64 Words: Long-term Forecasting with
+  Transformers", arXiv: `2211.14730`.
