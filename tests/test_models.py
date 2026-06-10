@@ -172,3 +172,32 @@ def test_ensemble_shrinks_extreme_models_toward_market_prior() -> None:
 
     assert forecast is not None
     assert 0.50 < forecast.p_up < 0.88
+
+
+def test_ensemble_calibrates_large_model_market_dislocation() -> None:
+    observation = PriceObservation(
+        timestamp=1010,
+        market_start_epoch=1000,
+        market_end_epoch=1300,
+        spot_price=100.0,
+    )
+    ensemble = Ensemble(
+        models=[
+            StaticModel("a", 0.92),
+            StaticModel("b", 0.89),
+            StaticModel("c", 0.86),
+            StaticModel("d", 0.84),
+        ],
+        market_prior_weight=0.35,
+        disagreement_shrink=0.85,
+    )
+    forecast = ensemble.forecast(
+        RollingPriceWindow(),
+        observation,
+        make_book(0.39, 0.41),
+        make_book(0.59, 0.61),
+    )
+
+    assert forecast is not None
+    assert forecast.p_up < 0.70
+    assert forecast.p_up > 0.50

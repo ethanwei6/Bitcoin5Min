@@ -176,14 +176,20 @@ current default emphasizes probability calibration over hard filtering:
 - robust median/trimmed-mean blending to reduce outlier model influence
 - live orderbook-implied probability as a market prior
 - disagreement-based shrinkage toward 50/50 when the model stack is unstable
+- model-market gap shrinkage, so a large edge claim must survive calibration
+  before Kelly sees it
 
 The default research config avoids arbitrary hard strategy filters. A value of
 `0` disables optional brakes such as max trade size, per-market exposure, daily
-loss, drawdown, consecutive-loss, and per-market entry caps. It also uses
-full-Kelly sizing (`kelly_fraction: 1.0`) and `min_edge: 0.0`, so a trade is
+loss, drawdown, consecutive-loss, and per-market entry caps. It now uses
+quarter-Kelly sizing (`kelly_fraction: 0.25`) and `min_edge: 0.0`, so a trade is
 funded only when the model probability beats the executable cost after fees.
+Kelly also targets total exposure in the current market instead of re-sizing
+from scratch on every tick, which keeps the run model-driven without repeatedly
+stacking the same correlated bet.
 The live decision is therefore driven by model probability, weighted majority,
-available cash, top-of-book liquidity, and Kelly sizing.
+available cash, current market exposure, top-of-book liquidity, and calibrated
+Kelly sizing.
 
 Operational guards remain in place for data integrity: the bot still requires
 enough models, a captured interval start, positive Kelly spend after fees, and
@@ -191,8 +197,8 @@ enough time before resolution for the execution simulation to be meaningful.
 
 The point is not to claim alpha from one run or rescue weak predictions with
 filters. The point is to make every failure measurable, then improve the model
-stack, calibration, and weights until the full-Kelly paper strategy has
-repeatable positive expectancy.
+stack, calibration, weights, and sizing until the fractional-Kelly paper
+strategy has repeatable positive expectancy.
 
 ## Documentation
 

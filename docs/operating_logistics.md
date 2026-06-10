@@ -69,9 +69,11 @@ full Kelly fraction of bankroll to spend is:
 f = (p - c) / (1 - c)
 ```
 
-The default research config uses full Kelly (`kelly_fraction: 1.0`) and caps
-the resulting order only by available cash and orderbook top-of-book size.
-Optional `max_trade_usd` and `max_position_usd_per_market` limits can be turned
+The default research config uses quarter Kelly (`kelly_fraction: 0.25`) and
+targets total current-market exposure before adding to a position. This means a
+fresh signal can still receive meaningful size, but repeated ticks in the same
+market do not keep re-spending as though no position already exists. Optional
+`max_trade_usd` and `max_position_usd_per_market` limits can still be turned
 back on for production-style risk testing by setting them above `0`.
 
 ## Execution simulation
@@ -234,11 +236,13 @@ positive, but it showed that the real leak was model calibration: correlated
 short-horizon models could agree with each other while still being stale versus
 the live market. The current model stack therefore uses volatility-core weighted
 probability pooling, robust median/trimmed blending, orderbook-implied prior
-anchoring, and disagreement shrinkage before Kelly sizing sees a probability.
+anchoring, disagreement shrinkage, and model-market gap shrinkage before Kelly
+sizing sees a probability.
 
 The current research config disables the old hard brakes by setting them to
-`0`, sets `max_contract_entry_price` to `1.0`, uses full Kelly, and sets
-`min_edge` to `0.0`. That means repeated entries are allowed whenever the
-weighted model stack still sees positive post-fee edge. These are not proof of
-alpha; they are a cleaner way to test whether the model estimates themselves
-are good enough before adding production-style risk brakes back in.
+`0`, sets `max_contract_entry_price` to `1.0`, uses quarter Kelly, and sets
+`min_edge` to `0.0`. The sizing layer now treats Kelly as a target exposure for
+the active market, so repeated entries are allowed only when the current market
+position is still below the model-implied fractional-Kelly target. These are
+not proof of alpha; they are a cleaner way to test whether the model estimates
+themselves are good enough before adding production-style risk brakes back in.

@@ -139,7 +139,9 @@ class RiskEngine:
             )
 
         kelly_full = full_kelly_fraction(win_probability, effective_cost)
-        desired_spend = cash_usd * kelly_full * self.config.kelly_fraction
+        account_base_usd = cash_usd + market_exposure_usd
+        target_market_exposure = account_base_usd * kelly_full * self.config.kelly_fraction
+        desired_spend = max(0.0, target_market_exposure - market_exposure_usd)
         top_level_capacity = book.best_ask.size * effective_cost
         spend_limits = [desired_spend, top_level_capacity, cash_usd]
         if self.config.max_trade_usd > 0.0:
@@ -150,7 +152,7 @@ class RiskEngine:
             )
         spend = min(spend_limits)
         if spend <= 0.0:
-            return self._reject(side, "Kelly sizing leaves no spend capacity", win_probability)
+            return self._reject(side, "Kelly target exposure already reached", win_probability)
         shares = spend / effective_cost
         return TradeDecision(
             should_trade=True,

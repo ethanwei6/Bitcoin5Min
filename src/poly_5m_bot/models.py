@@ -757,12 +757,19 @@ class Ensemble:
         )
         dispersion = statistics.pstdev(model_probabilities) if len(model_probabilities) > 1 else 0.0
         market_prior = market_implied_up_probability(up_book, down_book)
+        model_market_gap = 0.0
         if market_prior is not None:
-            prior_weight = clamp(self.market_prior_weight + 0.50 * dispersion, 0.0, 0.55)
+            model_market_gap = abs(robust_p_up - market_prior)
+            prior_weight = clamp(self.market_prior_weight + 0.75 * dispersion, 0.0, 0.70)
             anchored_p_up = (1.0 - prior_weight) * robust_p_up + prior_weight * market_prior
         else:
             anchored_p_up = robust_p_up
-        shrink = clamp(dispersion * self.disagreement_shrink, 0.0, 0.10)
+        calibration_shrink = (
+            0.08
+            + dispersion * self.disagreement_shrink
+            + 0.35 * model_market_gap
+        )
+        shrink = clamp(calibration_shrink, 0.08, 0.35)
         p_up = clamp(0.5 + (anchored_p_up - 0.5) * (1.0 - shrink), 0.01, 0.99)
         expected = sum(
             weight * item.expected_end_price for weight, item in zip(weights, forecasts)

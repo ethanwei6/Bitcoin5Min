@@ -5,10 +5,12 @@ from pathlib import Path
 from poly_5m_bot.config import load_config
 
 
-def test_default_config_is_model_first_full_kelly_research_mode() -> None:
+def test_default_config_is_model_first_fractional_kelly_research_mode() -> None:
     config = load_config(Path("config/paper_btc_5m.json"))
 
-    assert config.kelly_fraction == 1.0
+    assert config.kelly_fraction == 0.25
+    assert config.market_prior_weight == 0.35
+    assert config.disagreement_shrink == 0.85
     assert config.min_edge == 0.0
     assert config.min_confidence == 0.0
     assert config.max_trade_usd == 0.0

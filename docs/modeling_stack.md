@@ -55,7 +55,10 @@ vote. It now combines probabilities through:
 - median and trimmed-mean blending, so one extreme model cannot dominate the
   probability estimate;
 - live orderbook-implied Up probability as a market prior;
-- disagreement shrinkage toward 50/50 when the model stack is dispersed.
+- disagreement shrinkage toward 50/50 when the model stack is dispersed;
+- model-market gap shrinkage, because a model that claims 80-90% win
+  probability against a much lower live market needs stronger empirical
+  calibration before receiving Kelly-sized capital.
 
 The weights are deliberately modest. They express current research judgment
 about correlated short-horizon models and should be re-estimated from a larger

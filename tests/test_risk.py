@@ -175,7 +175,7 @@ def test_zero_market_entry_and_position_caps_disable_hard_limits() -> None:
         up_book=make_book(0.50),
         down_book=make_book(0.50),
         cash_usd=1000.0,
-        market_exposure_usd=500.0,
+        market_exposure_usd=0.0,
         market_entries=99,
         daily_pnl_usd=-500.0,
         daily_drawdown_usd=500.0,
@@ -186,6 +186,64 @@ def test_zero_market_entry_and_position_caps_disable_hard_limits() -> None:
     assert decision.should_trade
     assert decision.side == "UP"
     assert decision.spend_usd > 25.0
+
+
+def test_fractional_kelly_targets_total_market_exposure_not_each_tick() -> None:
+    forecasts = [
+        ModelForecast("a", 0.72, 101.0, 0.44, "x"),
+        ModelForecast("b", 0.70, 101.0, 0.40, "x"),
+        ModelForecast("c", 0.68, 101.0, 0.36, "x"),
+        ModelForecast("d", 0.66, 101.0, 0.32, "x"),
+    ]
+    ensemble = EnsembleForecast(
+        p_up=0.69,
+        expected_end_price=100.5,
+        confidence=0.38,
+        forecasts=forecasts,
+        majority_side="UP",
+        majority_count=4,
+        majority_weight=4.0,
+        total_weight=4.0,
+    )
+    config = replace(
+        make_config(),
+        max_entries_per_market=0,
+        max_position_usd_per_market=0.0,
+        max_trade_usd=0.0,
+        max_daily_loss_usd=0.0,
+        max_daily_drawdown_usd=0.0,
+        max_consecutive_losses=0,
+        max_contract_entry_price=1.0,
+    )
+    first = RiskEngine(config).decide(
+        forecast=ensemble,
+        up_book=make_book(0.50, size=1000.0),
+        down_book=make_book(0.50),
+        cash_usd=1000.0,
+        market_exposure_usd=0.0,
+        market_entries=0,
+        daily_pnl_usd=0.0,
+        daily_drawdown_usd=0.0,
+        consecutive_losses=0,
+        seconds_from_start=30.0,
+        seconds_to_end=120.0,
+    )
+    second = RiskEngine(config).decide(
+        forecast=ensemble,
+        up_book=make_book(0.50, size=1000.0),
+        down_book=make_book(0.50),
+        cash_usd=1000.0 - first.spend_usd,
+        market_exposure_usd=first.spend_usd,
+        market_entries=1,
+        daily_pnl_usd=0.0,
+        daily_drawdown_usd=0.0,
+        consecutive_losses=0,
+        seconds_from_start=35.0,
+        seconds_to_end=115.0,
+    )
+    assert first.should_trade
+    assert not second.should_trade
+    assert second.reason == "Kelly target exposure already reached"
 
 
 def test_risk_engine_rejects_after_daily_drawdown_limit() -> None:
