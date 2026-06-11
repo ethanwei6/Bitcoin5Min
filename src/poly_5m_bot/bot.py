@@ -153,6 +153,7 @@ class PaperTradingBot:
             market_start_epoch=market.start_epoch,
             market_end_epoch=market.end_epoch,
             spot_price=spot.median_price,
+            source_spread_usd=spot.source_spread_usd,
         )
         self.window.append(observation)
         self.journal.append(

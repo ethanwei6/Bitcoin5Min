@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 
 from poly_5m_bot.models import (
+    DistanceToStartModel,
     Ensemble,
     EmpiricalIntervalKnnModel,
     ForecastModel,
@@ -115,6 +116,58 @@ def test_garch_model_emits_bounded_forecast() -> None:
     assert forecast.expected_end_price > 0
 
 
+def test_basis_spread_reduces_near_threshold_confidence() -> None:
+    low_spread_window = RollingPriceWindow(max_start_capture_lag_seconds=10)
+    high_spread_window = RollingPriceWindow(max_start_capture_lag_seconds=10)
+    low_start = PriceObservation(
+        timestamp=1002,
+        market_start_epoch=1000,
+        market_end_epoch=1300,
+        spot_price=100.0,
+        source_spread_usd=0.0,
+    )
+    high_start = PriceObservation(
+        timestamp=1002,
+        market_start_epoch=1000,
+        market_end_epoch=1300,
+        spot_price=100.0,
+        source_spread_usd=120.0,
+    )
+    low_spread_window.append(low_start)
+    high_spread_window.append(high_start)
+    low_observation = PriceObservation(
+        timestamp=1120,
+        market_start_epoch=1000,
+        market_end_epoch=1300,
+        spot_price=100.08,
+        source_spread_usd=0.0,
+    )
+    high_observation = PriceObservation(
+        timestamp=1120,
+        market_start_epoch=1000,
+        market_end_epoch=1300,
+        spot_price=100.08,
+        source_spread_usd=120.0,
+    )
+
+    low_forecast = DistanceToStartModel().forecast(
+        low_spread_window,
+        low_observation,
+        None,
+        None,
+    )
+    high_forecast = DistanceToStartModel().forecast(
+        high_spread_window,
+        high_observation,
+        None,
+        None,
+    )
+
+    assert low_forecast is not None
+    assert high_forecast is not None
+    assert abs(high_forecast.p_up - 0.5) < abs(low_forecast.p_up - 0.5)
+
+
 def test_merton_jump_diffusion_model_emits_bounded_forecast() -> None:
     window, observation = populated_window()
     forecast = MertonJumpDiffusionModel().forecast(window, observation, None, None)
@@ -200,7 +253,9 @@ def test_ensemble_calibrates_large_model_market_dislocation() -> None:
 
     assert forecast is not None
     assert forecast.p_up < 0.70
-    assert forecast.p_up > 0.50
+    assert forecast.market_prior_p_up is not None
+    assert forecast.raw_p_up > 0.50
+    assert forecast.market_prior_p_up < forecast.p_up < forecast.raw_p_up
 
 
 def test_ensemble_shrinks_early_interval_confidence_by_horizon() -> None:
@@ -241,3 +296,99 @@ def test_ensemble_shrinks_early_interval_confidence_by_horizon() -> None:
     assert early.horizon_confidence_multiplier < late.horizon_confidence_multiplier
     assert early.raw_p_up == late.raw_p_up
     assert early.market_prior_p_up == late.market_prior_p_up
+
+
+def test_zero_weight_models_do_not_influence_probability_pool() -> None:
+    observation = PriceObservation(
+        timestamp=1100,
+        market_start_epoch=1000,
+        market_end_epoch=1300,
+        spot_price=100.0,
+    )
+    ensemble = Ensemble(
+        models=[
+            StaticModel("disabled_overconfident_model", 0.99),
+            StaticModel("short_momentum", 0.22),
+            StaticModel("garch_1_1", 0.24),
+            StaticModel("student_t_garch", 0.26),
+        ],
+        model_weights={
+            "disabled_overconfident_model": 0.0,
+            "short_momentum": 1.0,
+            "garch_1_1": 1.0,
+            "student_t_garch": 1.0,
+        },
+        market_prior_weight=0.0,
+        disagreement_shrink=0.0,
+        horizon_confidence_min_multiplier=1.0,
+    )
+
+    forecast = ensemble.forecast(RollingPriceWindow(), observation, None, None)
+
+    assert forecast is not None
+    assert forecast.p_up < 0.30
+    assert forecast.total_weight == 3.0
+
+
+def test_horizon_shrink_targets_market_prior_for_large_dislocations() -> None:
+    early_observation = PriceObservation(
+        timestamp=1015,
+        market_start_epoch=1000,
+        market_end_epoch=1300,
+        spot_price=100.0,
+    )
+    late_observation = PriceObservation(
+        timestamp=1210,
+        market_start_epoch=1000,
+        market_end_epoch=1300,
+        spot_price=100.0,
+    )
+    ensemble = Ensemble(
+        models=[
+            StaticModel("short_momentum", 0.72),
+            StaticModel("garch_1_1", 0.69),
+            StaticModel("student_t_garch", 0.66),
+            StaticModel("mean_reversion", 0.78),
+        ],
+        horizon_confidence_min_multiplier=0.25,
+        horizon_confidence_power=0.65,
+    )
+    up_book = make_book(0.11, 0.13)
+    down_book = make_book(0.87, 0.89)
+
+    early = ensemble.forecast(RollingPriceWindow(), early_observation, up_book, down_book)
+    late = ensemble.forecast(RollingPriceWindow(), late_observation, up_book, down_book)
+
+    assert early is not None
+    assert late is not None
+    assert early.market_prior_p_up is not None
+    assert early.p_up < late.p_up
+    assert abs(early.p_up - early.market_prior_p_up) < abs(early.raw_p_up - early.market_prior_p_up)
+
+
+def test_ensemble_calibrates_false_recovery_value_against_extreme_market_prior() -> None:
+    observation = PriceObservation(
+        timestamp=1120,
+        market_start_epoch=1000,
+        market_end_epoch=1300,
+        spot_price=100.0,
+    )
+    ensemble = Ensemble(
+        models=[
+            StaticModel("short_momentum", 0.36),
+            StaticModel("garch_1_1", 0.34),
+            StaticModel("student_t_garch", 0.35),
+            StaticModel("mean_reversion", 0.72),
+            StaticModel("merton_jump_diffusion", 0.70),
+        ],
+        horizon_confidence_min_multiplier=1.0,
+    )
+    up_book = make_book(0.11, 0.13)
+    down_book = make_book(0.87, 0.89)
+
+    forecast = ensemble.forecast(RollingPriceWindow(), observation, up_book, down_book)
+
+    assert forecast is not None
+    assert forecast.directional_p_up < forecast.reversion_p_up
+    assert forecast.market_dislocation_shrink > 0.0
+    assert forecast.p_up < 0.35

@@ -84,9 +84,13 @@ vote. It now combines probabilities through:
 - model-market gap shrinkage, because a model that claims 80-90% win
   probability against a much lower live market needs stronger empirical
   calibration before receiving Kelly-sized capital.
-- horizon confidence shrinkage, because forecasts made early in a five-minute
-  interval have more time to be wrong before resolution than forecasts made near
-  expiry.
+- source-basis uncertainty from the live spot-source spread, because
+  Polymarket settles against the official Chainlink stream and a small
+  exchange-median edge can be noise when Coinbase/Kraken/Gemini/Binance quotes
+  are tens of dollars apart;
+- horizon confidence shrinkage toward the live market prior, not toward a
+  generic 50/50 coin flip. This prevents early uncertainty from manufacturing
+  fake value in cheap contracts that the market is already pricing as unlikely.
 
 The weights are deliberately modest. They express current research judgment
 about correlated short-horizon models and should be re-estimated from a larger

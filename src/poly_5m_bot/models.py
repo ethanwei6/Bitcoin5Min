@@ -15,6 +15,7 @@ class PriceObservation:
     market_start_epoch: int
     market_end_epoch: int
     spot_price: float
+    source_spread_usd: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -43,6 +44,10 @@ class EnsembleForecast:
     raw_p_up: float = 0.5
     market_prior_p_up: float | None = None
     horizon_confidence_multiplier: float = 1.0
+    directional_p_up: float = 0.5
+    reversion_p_up: float = 0.5
+    market_dislocation_shrink: float = 0.0
+    basis_prior_boost: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -96,13 +101,15 @@ def distribution_forecast(
     mean_log_return: float,
     variance_log_return: float,
     reason: str,
+    basis_variance_log_return: float = 0.0,
 ) -> ModelForecast:
-    sigma = math.sqrt(max(variance_log_return, 1e-12))
+    total_variance = max(variance_log_return + basis_variance_log_return, 1e-12)
+    sigma = math.sqrt(total_variance)
     threshold = math.log(start_price / observation.spot_price)
     z = (threshold - mean_log_return) / sigma
     p_up = clamp(1.0 - normal_cdf(z), 0.01, 0.99)
     expected = observation.spot_price * math.exp(
-        mean_log_return + 0.5 * variance_log_return
+        mean_log_return + 0.5 * max(variance_log_return, 1e-12)
     )
     return ModelForecast(
         name=name,
@@ -210,6 +217,7 @@ class RollingPriceWindow:
         self.observations: deque[PriceObservation] = deque(maxlen=maxlen)
         self.market_start_prices: dict[int, float] = {}
         self.market_start_capture_times: dict[int, float] = {}
+        self.market_start_source_spreads: dict[int, float] = {}
         self.max_start_capture_lag_seconds = max_start_capture_lag_seconds
 
     def append(self, observation: PriceObservation) -> None:
@@ -221,9 +229,16 @@ class RollingPriceWindow:
         ):
             self.market_start_prices[observation.market_start_epoch] = observation.spot_price
             self.market_start_capture_times[observation.market_start_epoch] = observation.timestamp
+            self.market_start_source_spreads[observation.market_start_epoch] = max(
+                observation.source_spread_usd,
+                0.0,
+            )
 
     def current_market_start_price(self, market_start_epoch: int) -> float | None:
         return self.market_start_prices.get(market_start_epoch)
+
+    def current_market_start_source_spread(self, market_start_epoch: int) -> float | None:
+        return self.market_start_source_spreads.get(market_start_epoch)
 
     def recent(self, seconds: float) -> list[PriceObservation]:
         if not self.observations:
@@ -259,6 +274,25 @@ class RollingPriceWindow:
     def realized_variance(self, seconds: float) -> float:
         return sum(ret * ret for _dt, ret in self.log_return_points(seconds))
 
+    def basis_sigma_price(self, observation: PriceObservation) -> float:
+        start_spread = self.current_market_start_source_spread(observation.market_start_epoch)
+        current_spread = max(observation.source_spread_usd, 0.0)
+        if start_spread is None:
+            start_spread = current_spread
+        combined_spread = math.sqrt(start_spread * start_spread + current_spread * current_spread)
+        return 0.85 * combined_spread
+
+    def basis_variance_log_return(
+        self,
+        observation: PriceObservation,
+        start_price: float,
+    ) -> float:
+        sigma_price = self.basis_sigma_price(observation)
+        if sigma_price <= 0.0:
+            return 0.0
+        reference_price = max(observation.spot_price, start_price, 1e-9)
+        return (sigma_price / reference_price) ** 2
+
 
 class ForecastModel:
     name = "base"
@@ -282,7 +316,8 @@ class DistanceToStartModel(ForecastModel):
             return None
         seconds_left = max(observation.market_end_epoch - observation.timestamp, 1.0)
         vol = window.realized_vol_per_second()
-        sigma_price = observation.spot_price * vol * math.sqrt(seconds_left)
+        price_sigma = observation.spot_price * vol * math.sqrt(seconds_left)
+        sigma_price = math.sqrt(price_sigma * price_sigma + window.basis_sigma_price(observation) ** 2)
         z = (observation.spot_price - start_price) / max(sigma_price, 1e-9)
         p_up = clamp(logistic(1.7 * z), 0.01, 0.99)
         return ModelForecast(
@@ -309,7 +344,8 @@ class ShortMomentumModel(ForecastModel):
         drift = log_ret / max(observation.timestamp - recent[0].timestamp, 1.0)
         expected = observation.spot_price * math.exp(drift * min(seconds_left, 90.0))
         vol = window.realized_vol_per_second()
-        sigma_price = observation.spot_price * vol * math.sqrt(seconds_left)
+        price_sigma = observation.spot_price * vol * math.sqrt(seconds_left)
+        sigma_price = math.sqrt(price_sigma * price_sigma + window.basis_sigma_price(observation) ** 2)
         z = (expected - start_price) / max(sigma_price, 1e-9)
         p_up = clamp(logistic(z), 0.01, 0.99)
         return ModelForecast(
@@ -332,13 +368,16 @@ class MeanReversionModel(ForecastModel):
         if start_price is None:
             return None
         prices = [obs.spot_price for obs in recent]
-        mean_price = statistics.fmean(prices)
-        vol = max(statistics.pstdev(prices), 1e-9)
-        stretch = (observation.spot_price - mean_price) / vol
+        median_price = statistics.median(prices)
+        absolute_deviations = [abs(price - median_price) for price in prices]
+        mad_scale = 1.4826 * statistics.median(absolute_deviations)
+        vol = max(mad_scale, 0.50 * statistics.pstdev(prices), 1e-9)
+        stretch = (observation.spot_price - median_price) / vol
         seconds_left = max(observation.market_end_epoch - observation.timestamp, 1.0)
-        reversion_strength = clamp(seconds_left / 300.0, 0.05, 0.5)
+        reversion_strength = clamp(seconds_left / 600.0, 0.03, 0.22)
         expected = observation.spot_price - stretch * vol * reversion_strength
-        sigma_price = observation.spot_price * window.realized_vol_per_second() * math.sqrt(seconds_left)
+        price_sigma = observation.spot_price * window.realized_vol_per_second() * math.sqrt(seconds_left)
+        sigma_price = math.sqrt(price_sigma * price_sigma + window.basis_sigma_price(observation) ** 2)
         z = (expected - start_price) / max(sigma_price, 1e-9)
         p_up = clamp(logistic(z), 0.01, 0.99)
         return ModelForecast(
@@ -346,7 +385,7 @@ class MeanReversionModel(ForecastModel):
             p_up=p_up,
             expected_end_price=expected,
             confidence=abs(p_up - 0.5) * 2,
-            reason=f"rolling stretch={stretch:.3f}",
+            reason=f"robust rolling stretch={stretch:.3f}",
         )
 
 
@@ -364,7 +403,8 @@ class VolatilityFadeModel(ForecastModel):
         vol = max(statistics.pstdev(returns), 1e-9)
         expected = observation.spot_price * math.exp(-0.25 * latest_move)
         seconds_left = max(observation.market_end_epoch - observation.timestamp, 1.0)
-        sigma_price = observation.spot_price * vol * math.sqrt(seconds_left)
+        price_sigma = observation.spot_price * vol * math.sqrt(seconds_left)
+        sigma_price = math.sqrt(price_sigma * price_sigma + window.basis_sigma_price(observation) ** 2)
         z = (expected - start_price) / max(sigma_price, 1e-9)
         p_up = clamp(logistic(z), 0.01, 0.99)
         return ModelForecast(
@@ -402,6 +442,7 @@ class EwmaVolatilityModel(ForecastModel):
             drift,
             variance * seconds_left,
             f"EWMA lambda={self.decay:.2f}, variance_per_second={variance:.10f}",
+            window.basis_variance_log_return(observation, start_price),
         )
 
 
@@ -434,6 +475,7 @@ class GarchVolatilityModel(ForecastModel):
             drift,
             variance * seconds_left,
             f"GARCH(1,1) alpha={self.alpha:.2f}, beta={self.beta:.2f}, variance_per_second={variance:.10f}",
+            window.basis_variance_log_return(observation, start_price),
         )
 
 
@@ -469,6 +511,7 @@ class ThresholdGarchModel(ForecastModel):
             drift,
             variance * seconds_left,
             f"GJR-style variance_per_second={variance:.10f}",
+            window.basis_variance_log_return(observation, start_price),
         )
 
 
@@ -494,6 +537,7 @@ class HarRealizedVolatilityModel(ForecastModel):
             drift,
             variance_per_second * seconds_left,
             f"HAR RV short={rv_short:.10f}, medium={rv_medium:.10f}, long={rv_long:.10f}",
+            window.basis_variance_log_return(observation, start_price),
         )
 
 
@@ -522,7 +566,11 @@ class StudentTGarchModel(ForecastModel):
         df = clamp(6.0 / max(kurtosis - 3.0, 0.25) + 4.0, 4.0, 30.0)
         seconds_left = max(observation.market_end_epoch - observation.timestamp, 1.0)
         drift = 0.12 * window.mean_return_per_second(900.0) * seconds_left
-        sigma = math.sqrt(max(variance * seconds_left, 1e-12))
+        forecast_variance = variance * seconds_left + window.basis_variance_log_return(
+            observation,
+            start_price,
+        )
+        sigma = math.sqrt(max(forecast_variance, 1e-12))
         threshold = math.log(start_price / observation.spot_price)
         z = (threshold - drift) / sigma
         p_up = clamp(1.0 - student_t_cdf_approx(z, df), 0.01, 0.99)
@@ -565,6 +613,7 @@ class RegimeSwitchingVolatilityModel(ForecastModel):
             drift,
             max(variance, 1e-10) * seconds_left,
             f"two-regime vol high_prob={high_prob:.3f}",
+            window.basis_variance_log_return(observation, start_price),
         )
 
 
@@ -617,16 +666,33 @@ class MertonJumpDiffusionModel(ForecastModel):
         if start_price is None:
             return None
         total_time = sum(dt for dt, _ret in points)
-        scaled_returns = [ret / math.sqrt(dt) for dt, ret in points]
-        robust_sigma = max(statistics.pstdev(scaled_returns), 1e-8)
+        scaled_points = [
+            (index, dt, ret, ret / math.sqrt(dt))
+            for index, (dt, ret) in enumerate(points)
+        ]
+        scaled_returns = [scaled for _index, _dt, _ret, scaled in scaled_points]
+        center = statistics.median(scaled_returns)
+        absolute_deviations = [abs(item - center) for item in scaled_returns]
+        mad_sigma = 1.4826 * statistics.median(absolute_deviations)
+        sample_sigma = max(statistics.pstdev(scaled_returns), 1e-8)
+        robust_sigma = max(mad_sigma, 0.35 * sample_sigma, 1e-8)
+        jump_indices = {
+            index
+            for index, _dt, _ret, scaled in scaled_points
+            if abs(scaled - center) > 3.25 * robust_sigma
+        }
         jump_points = [
             (dt, ret)
-            for dt, ret in points
-            if abs(ret / math.sqrt(dt)) > 2.75 * robust_sigma
+            for index, dt, ret, _scaled in scaled_points
+            if index in jump_indices
         ]
-        continuous_points = [item for item in points if item not in jump_points]
+        continuous_points = [
+            (dt, ret)
+            for index, dt, ret, _scaled in scaled_points
+            if index not in jump_indices
+        ]
         continuous_time = max(sum(dt for dt, _ret in continuous_points), 1e-6)
-        continuous_mean = sum(ret for _dt, ret in continuous_points) / continuous_time
+        continuous_mean = 0.25 * sum(ret for _dt, ret in continuous_points) / continuous_time
         continuous_var = max(
             statistics.pvariance([ret / math.sqrt(dt) for dt, ret in continuous_points])
             if len(continuous_points) >= 3
@@ -635,7 +701,15 @@ class MertonJumpDiffusionModel(ForecastModel):
         )
         jump_lambda = len(jump_points) / max(total_time, 1e-6)
         jump_returns = [ret for _dt, ret in jump_points]
-        jump_mean = statistics.fmean(jump_returns) if jump_returns else 0.0
+        if jump_returns:
+            raw_jump_mean = statistics.median(jump_returns)
+            positive_jumps = sum(1 for ret in jump_returns if ret > 0.0)
+            negative_jumps = len(jump_returns) - positive_jumps
+            signed_balance = abs(positive_jumps - negative_jumps) / len(jump_returns)
+            sample_shrink = len(jump_returns) / (len(jump_returns) + 30.0)
+            jump_mean = raw_jump_mean * sample_shrink * max(0.25, signed_balance)
+        else:
+            jump_mean = 0.0
         jump_var = statistics.pvariance(jump_returns) if len(jump_returns) >= 2 else 0.0
         seconds_left = max(observation.market_end_epoch - observation.timestamp, 1.0)
         mean = (continuous_mean + jump_lambda * jump_mean) * seconds_left
@@ -647,6 +721,7 @@ class MertonJumpDiffusionModel(ForecastModel):
             mean,
             variance,
             f"lambda={jump_lambda:.5f}/s, jump_mean={jump_mean:.7f}, jumps={len(jump_points)}",
+            window.basis_variance_log_return(observation, start_price),
         )
 
 
@@ -679,6 +754,7 @@ class KalmanLocalTrendModel(ForecastModel):
             mean,
             variance,
             f"local log-price trend={trend:.8f}/s",
+            window.basis_variance_log_return(observation, start_price),
         )
 
 
@@ -704,22 +780,63 @@ class OrderBookImbalanceModel(ForecastModel):
         )
 
 
+DIRECTIONAL_MODEL_NAMES = frozenset(
+    {
+        "distance_to_start_random_walk",
+        "short_momentum",
+        "ewma_riskmetrics_volatility",
+        "garch_1_1",
+        "gjr_threshold_garch",
+        "har_realized_volatility",
+        "student_t_garch",
+        "regime_switching_volatility",
+    }
+)
+
+REVERSION_MODEL_NAMES = frozenset(
+    {
+        "mean_reversion",
+        "volatility_fade",
+        "empirical_interval_knn",
+        "merton_jump_diffusion",
+        "kalman_local_trend",
+        "polymarket_orderbook_imbalance",
+    }
+)
+
+
+def weighted_probability_for_names(
+    weighted_forecasts: list[tuple[float, ModelForecast]],
+    names: frozenset[str],
+    fallback: float,
+) -> float:
+    selected = [
+        (weight, forecast)
+        for weight, forecast in weighted_forecasts
+        if forecast.name in names and weight > 0.0
+    ]
+    total = sum(weight for weight, _forecast in selected)
+    if total <= 0.0:
+        return fallback
+    return sum(weight * forecast.p_up for weight, forecast in selected) / total
+
+
 class Ensemble:
     default_model_weights = {
-        "distance_to_start_random_walk": 0.75,
-        "short_momentum": 0.35,
-        "mean_reversion": 0.30,
-        "volatility_fade": 0.20,
-        "ewma_riskmetrics_volatility": 1.45,
-        "garch_1_1": 1.55,
-        "gjr_threshold_garch": 1.60,
-        "har_realized_volatility": 1.55,
-        "student_t_garch": 1.50,
-        "regime_switching_volatility": 1.35,
-        "empirical_interval_knn": 0.35,
-        "merton_jump_diffusion": 1.10,
-        "kalman_local_trend": 0.55,
-        "polymarket_orderbook_imbalance": 0.25,
+        "distance_to_start_random_walk": 0.85,
+        "short_momentum": 1.15,
+        "mean_reversion": 0.10,
+        "volatility_fade": 0.05,
+        "ewma_riskmetrics_volatility": 1.50,
+        "garch_1_1": 1.60,
+        "gjr_threshold_garch": 1.70,
+        "har_realized_volatility": 1.45,
+        "student_t_garch": 1.60,
+        "regime_switching_volatility": 1.45,
+        "empirical_interval_knn": 0.00,
+        "merton_jump_diffusion": 0.25,
+        "kalman_local_trend": 0.15,
+        "polymarket_orderbook_imbalance": 0.00,
     }
 
     def __init__(
@@ -753,6 +870,44 @@ class Ensemble:
         self.horizon_confidence_min_multiplier = clamp(horizon_confidence_min_multiplier, 0.0, 1.0)
         self.horizon_confidence_power = max(horizon_confidence_power, 0.01)
 
+    def _market_dislocation_calibrated_probability(
+        self,
+        p_up: float,
+        market_prior: float | None,
+        directional_p_up: float,
+        reversion_p_up: float,
+        observation: PriceObservation,
+    ) -> tuple[float, float]:
+        if market_prior is None:
+            return p_up, 0.0
+        model_market_gap = abs(p_up - market_prior)
+        interval_seconds = max(observation.market_end_epoch - observation.market_start_epoch, 1.0)
+        seconds_from_start = clamp(
+            observation.timestamp - observation.market_start_epoch,
+            0.0,
+            interval_seconds,
+        )
+        progress = seconds_from_start / interval_seconds
+        side = 1.0 if p_up >= market_prior else -1.0
+        reversion_pull = max(0.0, side * (reversion_p_up - directional_p_up))
+        directional_confirmation = max(0.0, side * (directional_p_up - market_prior))
+        dislocation = clamp((model_market_gap - 0.04) / 0.28, 0.0, 1.0)
+        market_extremity = clamp((abs(market_prior - 0.5) - 0.08) / 0.35, 0.0, 1.0)
+        unsupported_reversion = clamp((reversion_pull - 0.01) / 0.18, 0.0, 1.0)
+        confirmation = clamp(directional_confirmation / max(model_market_gap, 1e-8), 0.0, 1.0)
+        age = 0.55 + 0.45 * progress
+        shrink = (
+            (0.18 + 0.62 * dislocation)
+            * (0.50 + 0.50 * market_extremity)
+            * age
+            * (0.85 + 0.15 * unsupported_reversion)
+            * (1.0 - 0.20 * confirmation)
+        )
+        shrink = clamp(shrink, 0.0, 0.72)
+        target = market_prior + 0.18 * (directional_p_up - market_prior)
+        calibrated = p_up + shrink * (target - p_up)
+        return clamp(calibrated, 0.01, 0.99), shrink
+
     def forecast(
         self,
         window: RollingPriceWindow,
@@ -767,22 +922,56 @@ class Ensemble:
         ]
         if not forecasts:
             return None
-        weights = [max(self.model_weights.get(item.name, 1.0), 0.01) for item in forecasts]
+        weighted_forecasts = [
+            (max(self.model_weights.get(item.name, 1.0), 0.0), item)
+            for item in forecasts
+        ]
+        active_weighted_forecasts = [
+            (weight, item)
+            for weight, item in weighted_forecasts
+            if weight > 0.0
+        ]
+        if not active_weighted_forecasts:
+            return None
+        weights = [weight for weight, _item in active_weighted_forecasts]
+        active_forecasts = [item for _weight, item in active_weighted_forecasts]
         weight_total = sum(weights)
-        model_p_up = sum(weight * item.p_up for weight, item in zip(weights, forecasts))
+        model_p_up = sum(weight * item.p_up for weight, item in active_weighted_forecasts)
         model_p_up /= weight_total
-        model_probabilities = [item.p_up for item in forecasts]
+        model_probabilities = [item.p_up for item in active_forecasts]
         robust_p_up = (
             0.90 * model_p_up
             + 0.05 * statistics.median(model_probabilities)
             + 0.05 * trimmed_mean(model_probabilities)
         )
+        directional_p_up = weighted_probability_for_names(
+            active_weighted_forecasts,
+            DIRECTIONAL_MODEL_NAMES,
+            robust_p_up,
+        )
+        reversion_p_up = weighted_probability_for_names(
+            active_weighted_forecasts,
+            REVERSION_MODEL_NAMES,
+            robust_p_up,
+        )
         dispersion = statistics.pstdev(model_probabilities) if len(model_probabilities) > 1 else 0.0
         market_prior = market_implied_up_probability(up_book, down_book)
         model_market_gap = 0.0
+        basis_prior_boost = 0.0
         if market_prior is not None:
             model_market_gap = abs(robust_p_up - market_prior)
-            prior_weight = clamp(self.market_prior_weight + 0.75 * dispersion, 0.0, 0.70)
+            start_price = window.current_market_start_price(observation.market_start_epoch)
+            if start_price is not None:
+                basis_sigma = window.basis_sigma_price(observation)
+                threshold_distance = abs(observation.spot_price - start_price)
+                if basis_sigma > 0.0:
+                    basis_dominance = basis_sigma / (basis_sigma + threshold_distance + 1e-9)
+                    basis_prior_boost = 0.20 * basis_dominance
+            prior_weight = clamp(
+                self.market_prior_weight + 0.75 * dispersion + basis_prior_boost,
+                0.0,
+                0.90,
+            )
             anchored_p_up = (1.0 - prior_weight) * robust_p_up + prior_weight * market_prior
         else:
             anchored_p_up = robust_p_up
@@ -793,22 +982,29 @@ class Ensemble:
         )
         shrink = clamp(calibration_shrink, 0.08, 0.35)
         raw_p_up = clamp(0.5 + (anchored_p_up - 0.5) * (1.0 - shrink), 0.01, 0.99)
+        raw_p_up, market_dislocation_shrink = self._market_dislocation_calibrated_probability(
+            raw_p_up,
+            market_prior,
+            directional_p_up,
+            reversion_p_up,
+            observation,
+        )
         horizon_multiplier = horizon_confidence_multiplier(
             observation,
             min_multiplier=self.horizon_confidence_min_multiplier,
             power=self.horizon_confidence_power,
         )
-        horizon_target = 0.5
+        horizon_target = market_prior if market_prior is not None else 0.5
         p_up = clamp(
             horizon_target + (raw_p_up - horizon_target) * horizon_multiplier,
             0.01,
             0.99,
         )
         expected = sum(
-            weight * item.expected_end_price for weight, item in zip(weights, forecasts)
+            weight * item.expected_end_price for weight, item in active_weighted_forecasts
         ) / weight_total
-        up_weight = sum(weight for weight, item in zip(weights, forecasts) if item.vote == "UP")
-        down_weight = sum(weight for weight, item in zip(weights, forecasts) if item.vote == "DOWN")
+        up_weight = sum(weight for weight, item in active_weighted_forecasts if item.vote == "UP")
+        down_weight = sum(weight for weight, item in active_weighted_forecasts if item.vote == "DOWN")
         majority_side = "UP" if up_weight >= down_weight else "DOWN"
         majority_count = sum(
             1
@@ -828,4 +1024,8 @@ class Ensemble:
             raw_p_up=raw_p_up,
             market_prior_p_up=market_prior,
             horizon_confidence_multiplier=horizon_multiplier,
+            directional_p_up=directional_p_up,
+            reversion_p_up=reversion_p_up,
+            market_dislocation_shrink=market_dislocation_shrink,
+            basis_prior_boost=basis_prior_boost,
         )

@@ -93,3 +93,62 @@ market." The more realistic hypothesis is narrower:
 The next research step is another clean paper ledger using the underlying-tested
 volatility-core ensemble plus longer real-price confidence calibration, not live
 trading.
+
+## June 11 Model Regression
+
+The later two-hour paper run was a useful failure case:
+
+| Metric | Value |
+|---|---:|
+| Settled trades | 40 |
+| Realized PnL | -$289.75 |
+| Win rate | 20.0% |
+| Max drawdown | -$309.31 |
+
+The headline comparison to the prior +$2.8k one-hour run was misleading. The
+profitable run used far more effective turnover and repeated entries in the same
+markets, including a single market drawdown around -$675. The later loss was
+smaller in exposure, but it exposed the model bug more clearly: the ensemble
+kept treating cheap UP contracts as recovery value when the live market and the
+official-resolution basis disagreed with the exchange-median signal.
+
+The key model fix was not a hard entry cutoff. The ensemble now:
+
+- allows zero-weight models to contribute nothing to probability pooling;
+- heavily downweights KNN, orderbook imbalance, Merton jump diffusion, Kalman,
+  mean-reversion, and volatility-fade signals until they show out-of-sample
+  reliability;
+- shrinks horizon uncertainty toward the market prior instead of 50/50;
+- adds source-spread basis variance to the volatility models;
+- increases market-prior anchoring when source-basis noise is large relative to
+  distance from the interval start.
+
+On the saved bad-run snapshot replay, these changes reduced the comparable
+replay loss from roughly -$304 to about -$27. That is not proof of alpha; it is
+evidence that the worst regression was calibration and oracle-basis handling,
+not simply unlucky variance.
+
+## June 11 Follow-Up Run
+
+A later two-hour paper run with the calibrated stack finished positive, but the
+path was still too concentrated to treat as validated edge:
+
+| Metric | Value |
+|---|---:|
+| Settled trades | 32 |
+| Realized PnL | +$100.69 |
+| Win rate | 37.5% |
+| Max drawdown | -$45.83 |
+
+The largest trade made +$121.07 after buying a late DOWN contract at 16c. The
+trade was not a high-confidence directional forecast; it was a cheap-underdog
+dislocation where the model assigned roughly 28% probability to a contract the
+book briefly offered near 16c. Excluding that one trade, the run would have been
+negative.
+
+This is an important distinction for future research. The current bot can be
+profitable in a value-betting sense while still losing more trades than it wins.
+For a >50% win-rate strategy, directional trades must be evaluated separately
+from underdog dislocation trades. The next reports should break out those
+cohorts explicitly instead of judging the entire ledger as one homogeneous
+strategy.
