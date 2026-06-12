@@ -48,6 +48,7 @@ class EnsembleForecast:
     reversion_p_up: float = 0.5
     market_dislocation_shrink: float = 0.0
     basis_prior_boost: float = 0.0
+    spot_distance_from_start: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -393,14 +394,15 @@ class VolatilityFadeModel(ForecastModel):
     name = "volatility_fade"
 
     def forecast(self, window: RollingPriceWindow, observation: PriceObservation, up_book: OrderBook | None, down_book: OrderBook | None) -> ModelForecast | None:
-        returns = window.log_returns(300.0)
-        if len(returns) < 4:
+        points = window.log_return_points(300.0)
+        if len(points) < 4:
             return None
         start_price = window.current_market_start_price(observation.market_start_epoch)
         if start_price is None:
             return None
+        returns = [ret for _dt, ret in points]
         latest_move = sum(returns[-3:])
-        vol = max(statistics.pstdev(returns), 1e-9)
+        vol = window.realized_vol_per_second(300.0)
         expected = observation.spot_price * math.exp(-0.25 * latest_move)
         seconds_left = max(observation.market_end_epoch - observation.timestamp, 1.0)
         price_sigma = observation.spot_price * vol * math.sqrt(seconds_left)
@@ -412,7 +414,7 @@ class VolatilityFadeModel(ForecastModel):
             p_up=p_up,
             expected_end_price=expected,
             confidence=abs(p_up - 0.5) * 2,
-            reason=f"fade latest log move={latest_move:.7f}",
+            reason=f"fade latest log move={latest_move:.7f}, vol_per_second={vol:.10f}",
         )
 
 
@@ -823,19 +825,19 @@ def weighted_probability_for_names(
 
 class Ensemble:
     default_model_weights = {
-        "distance_to_start_random_walk": 0.85,
-        "short_momentum": 1.15,
-        "mean_reversion": 0.10,
-        "volatility_fade": 0.05,
-        "ewma_riskmetrics_volatility": 1.50,
+        "distance_to_start_random_walk": 0.95,
+        "short_momentum": 0.45,
+        "mean_reversion": 0.35,
+        "volatility_fade": 0.30,
+        "ewma_riskmetrics_volatility": 1.55,
         "garch_1_1": 1.60,
-        "gjr_threshold_garch": 1.70,
-        "har_realized_volatility": 1.45,
-        "student_t_garch": 1.60,
+        "gjr_threshold_garch": 1.65,
+        "har_realized_volatility": 1.55,
+        "student_t_garch": 1.55,
         "regime_switching_volatility": 1.45,
         "empirical_interval_knn": 0.00,
-        "merton_jump_diffusion": 0.25,
-        "kalman_local_trend": 0.15,
+        "merton_jump_diffusion": 0.20,
+        "kalman_local_trend": 0.10,
         "polymarket_orderbook_imbalance": 0.00,
     }
 
@@ -958,9 +960,12 @@ class Ensemble:
         market_prior = market_implied_up_probability(up_book, down_book)
         model_market_gap = 0.0
         basis_prior_boost = 0.0
+        start_price = window.current_market_start_price(observation.market_start_epoch)
+        spot_distance_from_start = (
+            observation.spot_price - start_price if start_price is not None else 0.0
+        )
         if market_prior is not None:
             model_market_gap = abs(robust_p_up - market_prior)
-            start_price = window.current_market_start_price(observation.market_start_epoch)
             if start_price is not None:
                 basis_sigma = window.basis_sigma_price(observation)
                 threshold_distance = abs(observation.spot_price - start_price)
@@ -1028,4 +1033,5 @@ class Ensemble:
             reversion_p_up=reversion_p_up,
             market_dislocation_shrink=market_dislocation_shrink,
             basis_prior_boost=basis_prior_boost,
+            spot_distance_from_start=spot_distance_from_start,
         )

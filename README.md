@@ -39,7 +39,7 @@ This repo is designed around those questions.
   market-specific `itode` taker delay metadata, applies FOK/FAK fill logic, and
   records latency/slippage/rejection evidence.
 - JSONL research ledger and scripts for official settlement reconciliation,
-  trade audit, evidence reports, and strategy postmortems.
+  trade audit, market-level calibration evidence, and strategy postmortems.
 - macOS LaunchAgent and VPS/systemd operating notes for long-running shadow
   trading.
 
@@ -69,7 +69,7 @@ Core package: `src/poly_5m_bot/`
 - `market.py`: active BTC 5m market discovery.
 - `spot.py`: exchange quote aggregation and quality checks.
 - `models.py`: online forecasting ensemble.
-- `risk.py`: weighted majority, edge, Kelly sizing, and optional risk brakes.
+- `risk.py`: weighted majority, edge, cohort-aware Kelly sizing, and optional risk brakes.
 - `execution.py`: paper CLOB execution simulator.
 - `paper.py`: durable cash/position ledger.
 - `bot.py`: continuous runner and drain-mode shutdown behavior.

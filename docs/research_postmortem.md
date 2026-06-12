@@ -152,3 +152,29 @@ For a >50% win-rate strategy, directional trades must be evaluated separately
 from underdog dislocation trades. The next reports should break out those
 cohorts explicitly instead of judging the entire ledger as one homogeneous
 strategy.
+
+The follow-up implementation adds that separation directly to the risk engine
+and reports. Future trades carry `raw_probability`, haircut-adjusted
+`probability`, `kelly_scale`, and `trade_cohort` fields. Underdog value trades
+receive small adverse-selection haircuts and smaller Kelly sizing instead of
+being hard-filtered out. This preserves the core positive-expectancy objective
+while reducing dependence on one large late-underdog hit.
+
+## Three-hour calibrated run
+
+The next three-hour run finished positive, but it exposed two cleaner research
+issues than the headline PnL:
+
+- Realized PnL was +$26.66 on 9 settled trades, with a 33.3% trade win rate.
+- One market produced four same-side DOWN entries and a -$9.02 market loss,
+  which showed that repeated same-market signals were still too correlated to
+  size as fresh independent evidence.
+- Correcting calibration to score all proxy-resolved observed markets, not only
+  traded markets, improved the ensemble Brier read to 0.1742 across 2,064
+  signal ticks and showed the volatility/HAR/GARCH core remained stronger than
+  the traded-only subset had suggested.
+
+The implementation response was model-first: fix the volatility-fade model's
+time scaling, keep the volatility-core weights dominant, and add market-level
+calibration to the evidence report. The trader response was a soft same-market
+reentry haircut and Kelly decay rather than a hard entry cap.

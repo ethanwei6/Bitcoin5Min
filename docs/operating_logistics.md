@@ -61,6 +61,9 @@ A trade is eligible only when:
 - Configured confidence and edge thresholds clear. In the default model-first
   research config both are set to `0`, so positive Kelly spend after fees is
   the effective edge test.
+- Positive-edge underdog trades receive an explicit calibration haircut before
+  Kelly sizing. The bot can still buy cheap contracts, but the logged
+  probability is the haircut-adjusted probability used for sizing.
 - Optional risk brakes have not tripped. These are disabled with `0` in the
   default research config, including per-market entry caps, max trade size,
   per-market exposure, daily loss, drawdown, and consecutive-loss limits.
@@ -82,6 +85,26 @@ fresh signal can still receive meaningful size, but repeated ticks in the same
 market do not keep re-spending as though no position already exists. Optional
 `max_trade_usd` and `max_position_usd_per_market` limits can still be turned
 back on for production-style risk testing by setting them above `0`.
+
+Same-market reentries receive a small additional probability haircut and a
+Kelly decay per prior entry. This is a soft correlation adjustment, not a hard
+entry cap: the bot can still add exposure when the adjusted edge is strong, but
+it no longer treats several highly related ticks as independent evidence. The
+current research defaults use a `1.0%` reentry probability haircut and `0.55x`
+Kelly decay per previous entry in that same market.
+
+Underdog value trades are scaled inside Kelly rather than blocked. The risk
+engine stores both `raw_probability` and the final haircut-adjusted
+`probability`, plus a `trade_cohort` such as `underdog_rebound`,
+`underdog_continuation`, or `directional_confidence`. Evidence reports summarize
+these cohorts separately because a profitable underdog-value strategy can have
+a sub-50% win rate while still being positive expectancy.
+
+Evidence reports also include market-level calibration. Signal-tick calibration
+is useful for seeing what the bot believed through time, but those rows are
+highly autocorrelated inside each five-minute interval. Market-level calibration
+uses one latest signal per proxy-resolved market and is the cleaner input for
+model-weight changes.
 
 ## Execution simulation
 

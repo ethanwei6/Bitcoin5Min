@@ -19,6 +19,10 @@ class TradeDecision:
     spend_usd: float
     kelly_fraction_full: float
     reason: str
+    raw_probability: float = 0.0
+    probability_haircut: float = 0.0
+    kelly_scale: float = 1.0
+    trade_cohort: str = "none"
 
 
 def taker_fee_per_share(price: float, fee_rate: float) -> float:
@@ -109,13 +113,26 @@ class RiskEngine:
             and executable_price > self.config.max_contract_entry_price
         ):
             return self._reject(side, "contract price above risk cap", win_probability)
+        trade_cohort = self._trade_cohort(
+            side=side,
+            win_probability=win_probability,
+            executable_price=executable_price,
+            forecast=forecast,
+            seconds_to_end=seconds_to_end,
+        )
+        probability_haircut = self._probability_haircut(trade_cohort)
+        probability_haircut += self._same_market_reentry_haircut(market_entries)
+        adjusted_probability = max(0.01, win_probability - probability_haircut)
         effective_cost = executable_price + taker_fee_per_share(executable_price, self.config.fee_rate)
-        edge = win_probability - effective_cost
+        edge = adjusted_probability - effective_cost
+        kelly_scale = self._kelly_scale(trade_cohort) * self._same_market_reentry_kelly_scale(
+            market_entries
+        )
         if edge < self.config.min_edge:
             return TradeDecision(
                 should_trade=False,
                 side=side,
-                probability=win_probability,
+                probability=adjusted_probability,
                 executable_price=executable_price,
                 effective_cost=effective_cost,
                 edge=edge,
@@ -123,12 +140,16 @@ class RiskEngine:
                 spend_usd=0.0,
                 kelly_fraction_full=0.0,
                 reason="edge below threshold",
+                raw_probability=win_probability,
+                probability_haircut=probability_haircut,
+                kelly_scale=kelly_scale,
+                trade_cohort=trade_cohort,
             )
         if self.config.max_edge < 1.0 and edge > self.config.max_edge:
             return TradeDecision(
                 should_trade=False,
                 side=side,
-                probability=win_probability,
+                probability=adjusted_probability,
                 executable_price=executable_price,
                 effective_cost=effective_cost,
                 edge=edge,
@@ -136,11 +157,20 @@ class RiskEngine:
                 spend_usd=0.0,
                 kelly_fraction_full=0.0,
                 reason="edge above dislocation cap",
+                raw_probability=win_probability,
+                probability_haircut=probability_haircut,
+                kelly_scale=kelly_scale,
+                trade_cohort=trade_cohort,
             )
 
-        kelly_full = full_kelly_fraction(win_probability, effective_cost)
+        kelly_full = full_kelly_fraction(adjusted_probability, effective_cost)
         account_base_usd = cash_usd + market_exposure_usd
-        target_market_exposure = account_base_usd * kelly_full * self.config.kelly_fraction
+        target_market_exposure = (
+            account_base_usd
+            * kelly_full
+            * self.config.kelly_fraction
+            * kelly_scale
+        )
         desired_spend = max(0.0, target_market_exposure - market_exposure_usd)
         top_level_capacity = book.best_ask.size * effective_cost
         spend_limits = [desired_spend, top_level_capacity, cash_usd]
@@ -152,12 +182,27 @@ class RiskEngine:
             )
         spend = min(spend_limits)
         if spend <= 0.0:
-            return self._reject(side, "Kelly target exposure already reached", win_probability)
+            return TradeDecision(
+                should_trade=False,
+                side=side,
+                probability=adjusted_probability,
+                executable_price=executable_price,
+                effective_cost=effective_cost,
+                edge=edge,
+                shares=0.0,
+                spend_usd=0.0,
+                kelly_fraction_full=kelly_full,
+                reason="Kelly target exposure already reached",
+                raw_probability=win_probability,
+                probability_haircut=probability_haircut,
+                kelly_scale=kelly_scale,
+                trade_cohort=trade_cohort,
+            )
         shares = spend / effective_cost
         return TradeDecision(
             should_trade=True,
             side=side,
-            probability=win_probability,
+            probability=adjusted_probability,
             executable_price=executable_price,
             effective_cost=effective_cost,
             edge=edge,
@@ -165,6 +210,10 @@ class RiskEngine:
             spend_usd=spend,
             kelly_fraction_full=kelly_full,
             reason="trade eligible",
+            raw_probability=win_probability,
+            probability_haircut=probability_haircut,
+            kelly_scale=kelly_scale,
+            trade_cohort=trade_cohort,
         )
 
     def check_execution_fill(
@@ -207,6 +256,7 @@ class RiskEngine:
             spend_usd=0.0,
             kelly_fraction_full=0.0,
             reason=reason,
+            raw_probability=probability,
         )
 
     @staticmethod
@@ -217,3 +267,55 @@ class RiskEngine:
             "effective_cost": effective_cost,
             "edge": edge,
         }
+
+    def _trade_cohort(
+        self,
+        *,
+        side: str,
+        win_probability: float,
+        executable_price: float,
+        forecast: EnsembleForecast,
+        seconds_to_end: float,
+    ) -> str:
+        if side not in {"UP", "DOWN"}:
+            return "none"
+        if win_probability >= 0.5:
+            return "directional_confidence"
+        if executable_price >= 0.5:
+            return "low_confidence_full_price"
+
+        distance = forecast.spot_distance_from_start
+        rebound = (side == "UP" and distance < 0.0) or (side == "DOWN" and distance > 0.0)
+        base = "underdog_rebound" if rebound else "underdog_continuation"
+        if seconds_to_end <= self.config.late_underdog_seconds:
+            return f"late_{base}"
+        return base
+
+    def _probability_haircut(self, trade_cohort: str) -> float:
+        haircut = 0.0
+        if "underdog" in trade_cohort:
+            haircut += max(0.0, self.config.underdog_probability_haircut)
+        if "rebound" in trade_cohort:
+            haircut += max(0.0, self.config.rebound_probability_haircut)
+        if trade_cohort.startswith("late_") and "underdog" in trade_cohort:
+            haircut += max(0.0, self.config.late_underdog_probability_haircut)
+        return haircut
+
+    def _kelly_scale(self, trade_cohort: str) -> float:
+        scale = 1.0
+        if "underdog" in trade_cohort:
+            scale *= max(0.0, self.config.underdog_kelly_scale)
+        if "rebound" in trade_cohort:
+            scale *= max(0.0, self.config.rebound_kelly_scale)
+        if trade_cohort.startswith("late_") and "underdog" in trade_cohort:
+            scale *= max(0.0, self.config.late_underdog_kelly_scale)
+        return scale
+
+    def _same_market_reentry_haircut(self, market_entries: int) -> float:
+        return max(0.0, self.config.same_market_reentry_probability_haircut) * max(
+            0, market_entries
+        )
+
+    def _same_market_reentry_kelly_scale(self, market_entries: int) -> float:
+        decay = min(1.0, max(0.0, self.config.same_market_reentry_kelly_decay))
+        return decay ** max(0, market_entries)

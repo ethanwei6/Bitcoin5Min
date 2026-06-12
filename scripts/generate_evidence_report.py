@@ -119,6 +119,215 @@ def settlement_by_trade(trades: list[dict[str, Any]], settlements: list[dict[str
     return paired
 
 
+def group_snapshots_by_market(snapshots: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for snapshot in snapshots:
+        market = snapshot.get("market") or {}
+        slug = market.get("slug")
+        if slug is not None:
+            grouped[str(slug)].append(snapshot)
+    return grouped
+
+
+def nearest_snapshot(
+    snapshots_by_market: dict[str, list[dict[str, Any]]],
+    market_slug: str,
+    timestamp: float,
+) -> dict[str, Any] | None:
+    rows = snapshots_by_market.get(market_slug) or []
+    if not rows:
+        return None
+    return min(rows, key=lambda row: abs(float(row.get("timestamp", 0.0)) - timestamp))
+
+
+def snapshot_spot_price(snapshot: dict[str, Any] | None) -> float | None:
+    if snapshot is None:
+        return None
+    spot = snapshot.get("spot") or {}
+    value = spot.get("median_price")
+    return float(value) if value is not None else None
+
+
+def proxy_winners_from_snapshots(
+    snapshots: list[dict[str, Any]],
+    *,
+    max_start_lag_seconds: float = 15.0,
+    max_end_lag_seconds: float = 30.0,
+) -> dict[str, str]:
+    """Infer interval winners from observed spot snapshots for model scoring.
+
+    Trade PnL still uses official Polymarket settlements when available. This
+    proxy map lets calibration score all observed completed markets, not just
+    the subset the trader happened to enter.
+    """
+    ordered = sorted(snapshots, key=lambda row: float(row.get("timestamp", 0.0)))
+    markets: dict[str, dict[str, Any]] = {}
+    grouped = group_snapshots_by_market(ordered)
+    for snapshot in ordered:
+        market = snapshot.get("market") or {}
+        slug = market.get("slug")
+        if slug is None:
+            continue
+        markets[str(slug)] = market
+
+    winners: dict[str, str] = {}
+    for slug, market in markets.items():
+        start_epoch = float(market.get("start_epoch", 0.0))
+        end_epoch = float(market.get("end_epoch", 0.0))
+        if start_epoch <= 0.0 or end_epoch <= start_epoch:
+            continue
+        market_rows = [
+            row
+            for row in grouped.get(slug, [])
+            if snapshot_spot_price(row) is not None
+            and float(row.get("timestamp", 0.0)) >= start_epoch
+        ]
+        if not market_rows:
+            continue
+        start_row = min(market_rows, key=lambda row: float(row.get("timestamp", 0.0)))
+        if float(start_row.get("timestamp", 0.0)) - start_epoch > max_start_lag_seconds:
+            continue
+        end_rows = [
+            row
+            for row in ordered
+            if snapshot_spot_price(row) is not None
+            and float(row.get("timestamp", 0.0)) >= end_epoch
+        ]
+        if not end_rows:
+            continue
+        end_row = min(end_rows, key=lambda row: float(row.get("timestamp", 0.0)))
+        if float(end_row.get("timestamp", 0.0)) - end_epoch > max_end_lag_seconds:
+            continue
+        start_price = snapshot_spot_price(start_row)
+        end_price = snapshot_spot_price(end_row)
+        if start_price is None or end_price is None:
+            continue
+        winners[slug] = "UP" if end_price >= start_price else "DOWN"
+    return winners
+
+
+def reconstructed_trade_cohort(
+    pair: dict[str, Any],
+    snapshots_by_market: dict[str, list[dict[str, Any]]],
+) -> str:
+    trade = pair["trade"]
+    position = trade["position"]
+    decision = trade.get("decision") or {}
+    explicit = decision.get("trade_cohort")
+    if explicit and explicit != "none":
+        return str(explicit)
+
+    side = str(position.get("side", ""))
+    raw_probability = float(decision.get("raw_probability", decision.get("probability", 0.5)))
+    fill_price = float(position.get("price", 0.0))
+    if raw_probability >= 0.5:
+        return "directional_confidence"
+    if fill_price >= 0.5:
+        return "low_confidence_full_price"
+
+    opened_at = float(position["opened_at"])
+    seconds_to_end = float(position["market_end_epoch"]) - opened_at
+    start_price = position.get("start_price_proxy")
+    snapshot = nearest_snapshot(
+        snapshots_by_market,
+        str(position["market_slug"]),
+        opened_at,
+    )
+    spot_price = None
+    if snapshot is not None:
+        spot = snapshot.get("spot") or {}
+        if spot.get("median_price") is not None:
+            spot_price = float(spot["median_price"])
+
+    rebound = False
+    if start_price is not None and spot_price is not None:
+        distance = spot_price - float(start_price)
+        rebound = (side == "UP" and distance < 0.0) or (side == "DOWN" and distance > 0.0)
+    base = "underdog_rebound" if rebound else "underdog_continuation"
+    return f"late_{base}" if seconds_to_end <= 60.0 else base
+
+
+def summarize_pairs(pairs: list[dict[str, Any]]) -> dict[str, Any]:
+    count = len(pairs)
+    pnl_values = [
+        float(pair["settlement"]["pnl_usd"])
+        for pair in pairs
+        if pair.get("settlement") is not None
+    ]
+    costs = [float(pair["trade"]["position"]["cost_usd"]) for pair in pairs]
+    fill_prices = [float(pair["trade"]["position"]["price"]) for pair in pairs]
+    probabilities = [
+        float((pair["trade"].get("decision") or {}).get("probability", 0.5))
+        for pair in pairs
+    ]
+    raw_probabilities = [
+        float(
+            (pair["trade"].get("decision") or {}).get(
+                "raw_probability",
+                (pair["trade"].get("decision") or {}).get("probability", 0.5),
+            )
+        )
+        for pair in pairs
+    ]
+    seconds_to_end = [
+        float(pair["trade"]["position"]["market_end_epoch"])
+        - float(pair["trade"]["position"]["opened_at"])
+        for pair in pairs
+    ]
+    return {
+        "trades": count,
+        "settled_trades": len(pnl_values),
+        "pnl_usd": sum(pnl_values),
+        "cost_usd": sum(costs),
+        "win_rate": (
+            sum(1 for pnl in pnl_values if pnl > 0.0) / len(pnl_values)
+            if pnl_values
+            else 0.0
+        ),
+        "avg_fill_price": statistics.mean(fill_prices) if fill_prices else 0.0,
+        "avg_probability": statistics.mean(probabilities) if probabilities else 0.0,
+        "avg_raw_probability": statistics.mean(raw_probabilities) if raw_probabilities else 0.0,
+        "avg_seconds_to_end": statistics.mean(seconds_to_end) if seconds_to_end else 0.0,
+    }
+
+
+def cohort_diagnostics(
+    pairs: list[dict[str, Any]],
+    snapshots: list[dict[str, Any]],
+) -> dict[str, Any]:
+    snapshots_by_market = group_snapshots_by_market(snapshots)
+    by_cohort: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    price_buckets: dict[str, list[dict[str, Any]]] = {
+        "fill_below_20c": [],
+        "fill_below_35c": [],
+        "fill_below_50c": [],
+        "fill_50c_or_higher": [],
+    }
+    for pair in pairs:
+        position = pair["trade"]["position"]
+        fill = float(position["price"])
+        cohort = reconstructed_trade_cohort(pair, snapshots_by_market)
+        by_cohort[cohort].append(pair)
+        if fill < 0.20:
+            price_buckets["fill_below_20c"].append(pair)
+        if fill < 0.35:
+            price_buckets["fill_below_35c"].append(pair)
+        if fill < 0.50:
+            price_buckets["fill_below_50c"].append(pair)
+        else:
+            price_buckets["fill_50c_or_higher"].append(pair)
+    return {
+        "trade_cohorts": {
+            name: summarize_pairs(rows)
+            for name, rows in sorted(by_cohort.items())
+        },
+        "price_buckets": {
+            name: summarize_pairs(rows)
+            for name, rows in price_buckets.items()
+        },
+    }
+
+
 def calibration(signals: list[dict[str, Any]], winning_by_market: dict[str, str]) -> dict[str, Any]:
     ensemble_errors: list[float] = []
     bucketed: dict[str, dict[str, float]] = defaultdict(lambda: {"count": 0, "sum_probability": 0.0, "wins": 0})
@@ -171,6 +380,23 @@ def calibration(signals: list[dict[str, Any]], winning_by_market: dict[str, str]
             for name, errors in sorted(model_errors.items())
         },
     }
+
+
+def market_level_calibration(signals: list[dict[str, Any]], winning_by_market: dict[str, str]) -> dict[str, Any]:
+    latest_by_market: dict[str, dict[str, Any]] = {}
+    for signal in signals:
+        slug = signal.get("market_slug")
+        if slug not in winning_by_market:
+            continue
+        if not signal.get("forecast"):
+            continue
+        timestamp = float(signal.get("timestamp", 0.0))
+        previous = latest_by_market.get(str(slug))
+        if previous is None or timestamp >= float(previous.get("timestamp", 0.0)):
+            latest_by_market[str(slug)] = signal
+    result = calibration(list(latest_by_market.values()), winning_by_market)
+    result["settled_market_count"] = result.pop("settled_signal_count")
+    return result
 
 
 def execution_quality(executions: list[dict[str, Any]]) -> dict[str, Any]:
@@ -283,10 +509,12 @@ def markdown_report(report: dict[str, Any], pairs: list[dict[str, Any]]) -> str:
         f"- Realized PnL: `${report['trading']['realized_pnl_usd']:.2f}`",
         f"- Max drawdown: `${report['trading']['max_drawdown_usd']:.2f}`",
         f"- Win rate by trade: `{report['trading']['win_rate']:.3f}`",
+        f"- Trades below 50c: `{report['cohorts']['price_buckets']['fill_below_50c']['trades']}`",
         f"- Execution intents: `{report['execution']['intents']}` accepted / rejected: `{report['execution']['accepted']}` / `{report['execution']['rejected']}`",
         f"- Manual execution dry runs: `{report['execution']['dry_run_intents']}` accepted / rejected: `{report['execution']['dry_run_accepted']}` / `{report['execution']['dry_run_rejected']}`",
         f"- Median execution recheck latency: `{report['execution']['latency_ms_median']:.1f} ms`",
         f"- Ensemble Brier score: `{report['calibration']['ensemble_brier']}`",
+        f"- Resolved markets for calibration: `{report['counts']['calibration_markets']}`",
         "",
         "## Trades",
         "",
@@ -322,6 +550,37 @@ def markdown_report(report: dict[str, Any], pairs: list[dict[str, Any]]) -> str:
     lines.extend(
         [
             "",
+            "## Trade Cohorts",
+            "",
+            "| Cohort | Trades | Win Rate | Cost | PnL | Avg Fill | Avg p | Avg Raw p | Avg Seconds To End |",
+            "|---|---:|---:|---:|---:|---:|---:|---:|---:|",
+        ]
+    )
+    for name, row in report["cohorts"]["trade_cohorts"].items():
+        lines.append(
+            f"| `{name}` | {row['trades']} | {row['win_rate']:.3f} | "
+            f"${row['cost_usd']:.2f} | ${row['pnl_usd']:.2f} | "
+            f"{row['avg_fill_price']:.3f} | {row['avg_probability']:.3f} | "
+            f"{row['avg_raw_probability']:.3f} | {row['avg_seconds_to_end']:.1f} |"
+        )
+    lines.extend(
+        [
+            "",
+            "## Price Buckets",
+            "",
+            "| Bucket | Trades | Win Rate | Cost | PnL | Avg Fill | Avg p |",
+            "|---|---:|---:|---:|---:|---:|---:|",
+        ]
+    )
+    for name, row in report["cohorts"]["price_buckets"].items():
+        lines.append(
+            f"| `{name}` | {row['trades']} | {row['win_rate']:.3f} | "
+            f"${row['cost_usd']:.2f} | ${row['pnl_usd']:.2f} | "
+            f"{row['avg_fill_price']:.3f} | {row['avg_probability']:.3f} |"
+        )
+    lines.extend(
+        [
+            "",
             "## Execution Quality",
             "",
             f"- Rejection reasons: `{json.dumps(report['execution']['rejection_reasons'], sort_keys=True)}`",
@@ -341,6 +600,8 @@ def markdown_report(report: dict[str, Any], pairs: list[dict[str, Any]]) -> str:
             "",
             "## Calibration",
             "",
+            f"Signal-tick samples: `{report['calibration']['settled_signal_count']}`",
+            "",
             "| Bucket | Count | Avg p(UP) | Actual UP rate |",
             "|---|---:|---:|---:|",
         ]
@@ -348,6 +609,36 @@ def markdown_report(report: dict[str, Any], pairs: list[dict[str, Any]]) -> str:
     for bucket, row in report["calibration"]["buckets"].items():
         lines.append(
             f"| {bucket} | {row['count']} | {row['avg_probability']:.3f} | {row['actual_up_rate']:.3f} |"
+        )
+    lines.extend(
+        [
+            "",
+            "## Market-Level Calibration",
+            "",
+            f"Last-signal market samples: `{report['market_level_calibration']['settled_market_count']}`",
+            "",
+            "| Bucket | Count | Avg p(UP) | Actual UP rate |",
+            "|---|---:|---:|---:|",
+        ]
+    )
+    for bucket, row in report["market_level_calibration"]["buckets"].items():
+        lines.append(
+            f"| {bucket} | {row['count']} | {row['avg_probability']:.3f} | {row['actual_up_rate']:.3f} |"
+        )
+    lines.extend(
+        [
+            "",
+            "## Market-Level Model Scores",
+            "",
+            "| Model | Markets | Brier | Direction Accuracy |",
+            "|---|---:|---:|---:|",
+        ]
+    )
+    for name, row in report["market_level_calibration"]["models"].items():
+        direction = row["direction_accuracy"]
+        lines.append(
+            f"| `{name}` | {row['count']} | {row['brier']:.4f} | "
+            f"{direction:.3f} |"
         )
     lines.extend(
         [
@@ -397,19 +688,23 @@ def main() -> None:
     snapshots = [row for row in load_jsonl(output_dir / "snapshots.jsonl") if in_window(row, since, until)]
     executions = [row for row in load_jsonl(output_dir / "execution_simulations.jsonl") if in_window(row, since, until)]
     pairs = settlement_by_trade(trades, all_settlements)
-    winning_by_market = {row["market_slug"]: row["winning_side"] for row in all_settlements}
+    winning_by_market = proxy_winners_from_snapshots(snapshots)
+    winning_by_market.update({row["market_slug"]: row["winning_side"] for row in all_settlements})
     report = {
         "window": {"since": args.since, "until": args.until},
         "trading": trading_summary(pairs),
+        "cohorts": cohort_diagnostics(pairs, snapshots),
         "execution": execution_quality(executions),
         "spot_quality": spot_quality(snapshots),
         "calibration": calibration(signals, winning_by_market),
+        "market_level_calibration": market_level_calibration(signals, winning_by_market),
         "counts": {
             "snapshots": len(snapshots),
             "signals": len(signals),
             "trades": len(trades),
             "settlements": len(settlements),
             "execution_simulations": len(executions),
+            "calibration_markets": len(winning_by_market),
         },
     }
 

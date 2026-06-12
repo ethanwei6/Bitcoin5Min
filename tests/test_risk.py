@@ -374,6 +374,206 @@ def test_risk_engine_rejects_overconfident_dislocations() -> None:
     assert decision.reason == "edge above dislocation cap"
 
 
+def test_underdog_value_trade_gets_probability_haircut() -> None:
+    forecasts = [
+        ModelForecast("a", 0.34, 99.0, 0.32, "x"),
+        ModelForecast("b", 0.35, 99.0, 0.30, "x"),
+        ModelForecast("c", 0.36, 99.0, 0.28, "x"),
+    ]
+    ensemble = EnsembleForecast(
+        p_up=0.35,
+        expected_end_price=99.0,
+        confidence=0.30,
+        forecasts=forecasts,
+        majority_side="UP",
+        majority_count=3,
+        majority_weight=3.0,
+        total_weight=3.0,
+        spot_distance_from_start=-4.0,
+    )
+    config = replace(
+        make_config(),
+        min_confidence=0.0,
+        min_edge=0.0,
+        max_contract_entry_price=1.0,
+        max_seconds_after_market_start=0,
+        max_trade_usd=0.0,
+        max_position_usd_per_market=0.0,
+        underdog_probability_haircut=0.015,
+        rebound_probability_haircut=0.005,
+        late_underdog_probability_haircut=0.0,
+        underdog_kelly_scale=1.0,
+        rebound_kelly_scale=1.0,
+        late_underdog_kelly_scale=1.0,
+    )
+
+    decision = RiskEngine(config).decide(
+        forecast=ensemble,
+        up_book=make_book(0.25, size=1000.0),
+        down_book=make_book(0.75, size=1000.0),
+        cash_usd=1000.0,
+        market_exposure_usd=0.0,
+        market_entries=0,
+        daily_pnl_usd=0.0,
+        daily_drawdown_usd=0.0,
+        consecutive_losses=0,
+        seconds_from_start=120.0,
+        seconds_to_end=120.0,
+    )
+
+    assert decision.should_trade
+    assert decision.trade_cohort == "underdog_rebound"
+    assert decision.raw_probability == 0.35
+    assert round(decision.probability, 3) == 0.330
+    assert round(decision.probability_haircut, 3) == 0.020
+
+
+def test_late_underdog_value_trade_is_scaled_not_hard_blocked() -> None:
+    forecasts = [
+        ModelForecast("a", 0.30, 99.0, 0.40, "x"),
+        ModelForecast("b", 0.31, 99.0, 0.38, "x"),
+        ModelForecast("c", 0.32, 99.0, 0.36, "x"),
+    ]
+    ensemble = EnsembleForecast(
+        p_up=0.31,
+        expected_end_price=99.0,
+        confidence=0.38,
+        forecasts=forecasts,
+        majority_side="UP",
+        majority_count=3,
+        majority_weight=3.0,
+        total_weight=3.0,
+        spot_distance_from_start=3.0,
+    )
+    base_config = replace(
+        make_config(),
+        min_confidence=0.0,
+        min_edge=0.0,
+        max_contract_entry_price=1.0,
+        max_seconds_after_market_start=0,
+        max_trade_usd=0.0,
+        max_position_usd_per_market=0.0,
+        underdog_probability_haircut=0.0,
+        rebound_probability_haircut=0.0,
+        late_underdog_probability_haircut=0.0,
+        underdog_kelly_scale=1.0,
+        rebound_kelly_scale=1.0,
+        late_underdog_kelly_scale=1.0,
+    )
+    scaled_config = replace(
+        base_config,
+        underdog_probability_haircut=0.01,
+        late_underdog_probability_haircut=0.01,
+        underdog_kelly_scale=0.70,
+        late_underdog_kelly_scale=0.60,
+    )
+
+    base = RiskEngine(base_config).decide(
+        forecast=ensemble,
+        up_book=make_book(0.20, size=1000.0),
+        down_book=make_book(0.80, size=1000.0),
+        cash_usd=1000.0,
+        market_exposure_usd=0.0,
+        market_entries=0,
+        daily_pnl_usd=0.0,
+        daily_drawdown_usd=0.0,
+        consecutive_losses=0,
+        seconds_from_start=250.0,
+        seconds_to_end=50.0,
+    )
+    scaled = RiskEngine(scaled_config).decide(
+        forecast=ensemble,
+        up_book=make_book(0.20, size=1000.0),
+        down_book=make_book(0.80, size=1000.0),
+        cash_usd=1000.0,
+        market_exposure_usd=0.0,
+        market_entries=0,
+        daily_pnl_usd=0.0,
+        daily_drawdown_usd=0.0,
+        consecutive_losses=0,
+        seconds_from_start=250.0,
+        seconds_to_end=50.0,
+    )
+
+    assert base.should_trade
+    assert scaled.should_trade
+    assert scaled.trade_cohort == "late_underdog_continuation"
+    assert scaled.probability < scaled.raw_probability
+    assert scaled.kelly_scale == 0.42
+    assert scaled.spend_usd < base.spend_usd
+
+
+def test_same_market_reentry_is_softly_penalized_not_capped() -> None:
+    forecasts = [
+        ModelForecast("a", 0.30, 101.0, 0.40, "x"),
+        ModelForecast("b", 0.31, 101.0, 0.38, "x"),
+        ModelForecast("c", 0.32, 101.0, 0.36, "x"),
+    ]
+    ensemble = EnsembleForecast(
+        p_up=0.31,
+        expected_end_price=101.0,
+        confidence=0.38,
+        forecasts=forecasts,
+        majority_side="UP",
+        majority_count=3,
+        majority_weight=3.0,
+        total_weight=3.0,
+        spot_distance_from_start=3.0,
+    )
+    config = replace(
+        make_config(),
+        min_confidence=0.0,
+        min_edge=0.0,
+        max_contract_entry_price=1.0,
+        max_seconds_after_market_start=0,
+        max_entries_per_market=0,
+        max_trade_usd=0.0,
+        max_position_usd_per_market=0.0,
+        underdog_probability_haircut=0.015,
+        rebound_probability_haircut=0.0,
+        late_underdog_probability_haircut=0.0,
+        underdog_kelly_scale=0.70,
+        rebound_kelly_scale=1.0,
+        late_underdog_kelly_scale=1.0,
+        same_market_reentry_probability_haircut=0.010,
+        same_market_reentry_kelly_decay=0.55,
+    )
+
+    first = RiskEngine(config).decide(
+        forecast=ensemble,
+        up_book=make_book(0.20, size=1000.0),
+        down_book=make_book(0.80, size=1000.0),
+        cash_usd=1000.0,
+        market_exposure_usd=0.0,
+        market_entries=0,
+        daily_pnl_usd=0.0,
+        daily_drawdown_usd=0.0,
+        consecutive_losses=0,
+        seconds_from_start=120.0,
+        seconds_to_end=120.0,
+    )
+    reentry = RiskEngine(config).decide(
+        forecast=ensemble,
+        up_book=make_book(0.20, size=1000.0),
+        down_book=make_book(0.80, size=1000.0),
+        cash_usd=1000.0,
+        market_exposure_usd=0.0,
+        market_entries=2,
+        daily_pnl_usd=0.0,
+        daily_drawdown_usd=0.0,
+        consecutive_losses=0,
+        seconds_from_start=130.0,
+        seconds_to_end=110.0,
+    )
+
+    assert first.should_trade
+    assert reentry.should_trade
+    assert reentry.probability < first.probability
+    assert round(reentry.probability_haircut, 3) == 0.035
+    assert round(reentry.kelly_scale, 5) == 0.21175
+    assert reentry.spend_usd < first.spend_usd
+
+
 def test_execution_fill_must_still_clear_edge_threshold() -> None:
     decision = TradeDecision(
         should_trade=True,

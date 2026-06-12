@@ -7,6 +7,7 @@ import test_bot_drain
 import test_backtest_models
 import test_config
 import test_execution
+import test_evidence_report
 import test_market
 import test_models
 import test_risk
@@ -27,13 +28,18 @@ def main() -> None:
     test_risk.test_risk_engine_rejects_expensive_contracts()
     test_risk.test_risk_engine_rejects_late_contract_entries()
     test_risk.test_risk_engine_rejects_overconfident_dislocations()
+    test_risk.test_underdog_value_trade_gets_probability_haircut()
+    test_risk.test_late_underdog_value_trade_is_scaled_not_hard_blocked()
     test_risk.test_execution_fill_must_still_clear_edge_threshold()
     test_execution.test_execution_uses_refreshed_book_and_records_latency()
     test_execution.test_fok_rejects_when_refreshed_book_cannot_fill_inside_worst_price()
+    test_evidence_report.test_proxy_winners_use_all_observed_completed_markets()
+    test_evidence_report.test_market_level_calibration_uses_one_latest_signal_per_market()
     test_models.test_window_only_captures_interval_start_when_seen_early()
     test_models.test_garch_model_emits_bounded_forecast()
     test_models.test_basis_spread_reduces_near_threshold_confidence()
     test_models.test_merton_jump_diffusion_model_emits_bounded_forecast()
+    test_models.test_volatility_fade_uses_horizon_scaled_volatility()
     test_models.test_default_ensemble_has_multiple_econometric_forecasts()
     test_models.test_new_interval_models_emit_bounded_forecasts()
     test_models.test_ensemble_shrinks_extreme_models_toward_market_prior()

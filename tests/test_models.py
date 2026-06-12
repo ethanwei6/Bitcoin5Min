@@ -14,6 +14,7 @@ from poly_5m_bot.models import (
     RegimeSwitchingVolatilityModel,
     RollingPriceWindow,
     StudentTGarchModel,
+    VolatilityFadeModel,
 )
 from poly_5m_bot.orderbook import BookLevel, OrderBook
 
@@ -174,6 +175,15 @@ def test_merton_jump_diffusion_model_emits_bounded_forecast() -> None:
     assert forecast is not None
     assert 0.01 <= forecast.p_up <= 0.99
     assert "jumps=" in forecast.reason
+
+
+def test_volatility_fade_uses_horizon_scaled_volatility() -> None:
+    window, observation = populated_window()
+    forecast = VolatilityFadeModel().forecast(window, observation, None, None)
+
+    assert forecast is not None
+    assert 0.01 <= forecast.p_up <= 0.99
+    assert "vol_per_second=" in forecast.reason
 
 
 def test_default_ensemble_has_multiple_econometric_forecasts() -> None:

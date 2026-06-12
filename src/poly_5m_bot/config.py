@@ -60,6 +60,15 @@ class BotConfig:
     output_dir: Path
     polymarket: PolymarketConfig
     spot_sources: list[SpotSourceConfig]
+    underdog_probability_haircut: float = 0.0
+    rebound_probability_haircut: float = 0.0
+    late_underdog_probability_haircut: float = 0.0
+    underdog_kelly_scale: float = 1.0
+    rebound_kelly_scale: float = 1.0
+    late_underdog_kelly_scale: float = 1.0
+    late_underdog_seconds: float = 60.0
+    same_market_reentry_probability_haircut: float = 0.0
+    same_market_reentry_kelly_decay: float = 1.0
 
 
 def _require(data: dict[str, Any], key: str) -> Any:
@@ -141,4 +150,23 @@ def load_config(path: str | Path) -> BotConfig:
             slug_search_radius=int(_require(pm, "slug_search_radius")),
         ),
         spot_sources=spot_sources,
+        underdog_probability_haircut=float(
+            _optional(raw, "underdog_probability_haircut", 0.0)
+        ),
+        rebound_probability_haircut=float(
+            _optional(raw, "rebound_probability_haircut", 0.0)
+        ),
+        late_underdog_probability_haircut=float(
+            _optional(raw, "late_underdog_probability_haircut", 0.0)
+        ),
+        underdog_kelly_scale=float(_optional(raw, "underdog_kelly_scale", 1.0)),
+        rebound_kelly_scale=float(_optional(raw, "rebound_kelly_scale", 1.0)),
+        late_underdog_kelly_scale=float(_optional(raw, "late_underdog_kelly_scale", 1.0)),
+        late_underdog_seconds=float(_optional(raw, "late_underdog_seconds", 60.0)),
+        same_market_reentry_probability_haircut=float(
+            _optional(raw, "same_market_reentry_probability_haircut", 0.0)
+        ),
+        same_market_reentry_kelly_decay=float(
+            _optional(raw, "same_market_reentry_kelly_decay", 1.0)
+        ),
     )

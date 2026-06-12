@@ -83,7 +83,7 @@ vote. It now combines probabilities through:
 - disagreement shrinkage toward 50/50 when the model stack is dispersed;
 - model-market gap shrinkage, because a model that claims 80-90% win
   probability against a much lower live market needs stronger empirical
-  calibration before receiving Kelly-sized capital.
+  calibration before receiving Kelly-sized capital;
 - source-basis uncertainty from the live spot-source spread, because
   Polymarket settles against the official Chainlink stream and a small
   exchange-median edge can be noise when Coinbase/Kraken/Gemini/Binance quotes
@@ -95,6 +95,35 @@ vote. It now combines probabilities through:
 The weights are deliberately modest. They express current research judgment
 about correlated short-horizon models and should be re-estimated from a larger
 walk-forward paper ledger before any real-money promotion.
+
+After the 2026-06-12 three-hour run, the evidence report was updated to score
+model calibration on all proxy-resolved observed markets, not only markets the
+trader entered. That corrected view favored the volatility/HAR/GARCH core by
+Brier score and kept mean-reversion, short-momentum, and volatility-fade as
+secondary signals rather than primary Kelly drivers.
+
+## Underdog value calibration
+
+The live trader now records whether each proposed trade is a
+`directional_confidence`, `underdog_rebound`, or `underdog_continuation` setup.
+This matters because the latest paper evidence showed that most executed
+positive-EV trades were below 50c. Those can be rational value bets, but they
+should not receive the same sizing confidence as a contract the model believes
+is more likely than not to win.
+
+The research config therefore applies small probability haircuts and Kelly
+scales to underdog cohorts. This is not a hard price cutoff: a cheap contract
+can still be traded when the adjusted probability clears fees and execution
+cost. It simply recognizes that low-priced late-market dislocations have more
+adverse-selection and calibration risk than their raw model edge suggests.
+
+Repeated entries in the same five-minute market are also treated as correlated
+evidence rather than independent new bets. The paper config adds a small
+same-market reentry probability haircut and a Kelly decay for each prior entry
+in that market. This does not cap entries; it makes the sizing acknowledge that
+several ticks from the same interval usually reuse the same underlying thesis.
+The current defaults use a `1.0%` probability haircut and `0.55x` Kelly decay
+per prior same-market entry.
 
 ## Research Principle
 

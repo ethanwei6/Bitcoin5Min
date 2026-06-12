@@ -13,6 +13,18 @@ def test_default_config_is_model_first_fractional_kelly_research_mode() -> None:
     assert config.disagreement_shrink == 0.85
     assert config.horizon_confidence_min_multiplier == 0.25
     assert config.horizon_confidence_power == 0.65
+    assert config.underdog_probability_haircut == 0.015
+    assert config.rebound_probability_haircut == 0.005
+    assert config.late_underdog_probability_haircut == 0.010
+    assert config.underdog_kelly_scale == 0.70
+    assert config.rebound_kelly_scale == 0.85
+    assert config.late_underdog_kelly_scale == 0.60
+    assert config.same_market_reentry_probability_haircut == 0.010
+    assert config.same_market_reentry_kelly_decay == 0.55
+    assert config.model_weights["short_momentum"] == 0.45
+    assert config.model_weights["mean_reversion"] == 0.35
+    assert config.model_weights["volatility_fade"] == 0.30
+    assert config.model_weights["gjr_threshold_garch"] == 1.65
     assert config.min_edge == 0.0
     assert config.min_confidence == 0.0
     assert config.max_trade_usd == 0.0
