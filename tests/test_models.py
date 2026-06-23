@@ -15,6 +15,7 @@ from poly_5m_bot.models import (
     RollingPriceWindow,
     StudentTGarchModel,
     VolatilityFadeModel,
+    population_variance,
 )
 from poly_5m_bot.orderbook import BookLevel, OrderBook
 
@@ -66,6 +67,14 @@ def test_window_only_captures_interval_start_when_seen_early() -> None:
         )
     )
     assert window.current_market_start_price(1300) == 101.0
+
+
+def test_population_variance_matches_population_definition() -> None:
+    values = [0.1, -0.2, 0.4, 0.0]
+    mean = sum(values) / len(values)
+    expected = sum((value - mean) ** 2 for value in values) / len(values)
+
+    assert abs(population_variance(values) - expected) < 1e-15
 
 
 def populated_window() -> tuple[RollingPriceWindow, PriceObservation]:
@@ -340,6 +349,30 @@ def test_zero_weight_models_do_not_influence_probability_pool() -> None:
     assert forecast.total_weight == 3.0
 
 
+def test_marketless_ensemble_keeps_model_probability_for_underlying_backtests() -> None:
+    observation = PriceObservation(
+        timestamp=1015,
+        market_start_epoch=1000,
+        market_end_epoch=1300,
+        spot_price=100.0,
+    )
+    ensemble = Ensemble(
+        models=[
+            StaticModel("a", 0.80),
+            StaticModel("b", 0.82),
+            StaticModel("c", 0.84),
+        ],
+        horizon_confidence_min_multiplier=0.25,
+    )
+
+    forecast = ensemble.forecast(RollingPriceWindow(), observation, None, None)
+
+    assert forecast is not None
+    assert forecast.market_prior_p_up is None
+    assert abs(forecast.p_up - forecast.raw_p_up) < 1e-12
+    assert forecast.p_up > 0.80
+
+
 def test_horizon_shrink_targets_market_prior_for_large_dislocations() -> None:
     early_observation = PriceObservation(
         timestamp=1015,
@@ -402,3 +435,69 @@ def test_ensemble_calibrates_false_recovery_value_against_extreme_market_prior()
     assert forecast.directional_p_up < forecast.reversion_p_up
     assert forecast.market_dislocation_shrink > 0.0
     assert forecast.p_up < 0.35
+
+
+def test_ensemble_shrinks_cheap_continuation_value_more_than_rebound_value() -> None:
+    continuation_window = RollingPriceWindow(max_start_capture_lag_seconds=10)
+    rebound_window = RollingPriceWindow(max_start_capture_lag_seconds=10)
+    continuation_window.append(
+        PriceObservation(
+            timestamp=1002,
+            market_start_epoch=1000,
+            market_end_epoch=1300,
+            spot_price=100.0,
+        )
+    )
+    rebound_window.append(
+        PriceObservation(
+            timestamp=1002,
+            market_start_epoch=1000,
+            market_end_epoch=1300,
+            spot_price=100.0,
+        )
+    )
+    continuation_observation = PriceObservation(
+        timestamp=1120,
+        market_start_epoch=1000,
+        market_end_epoch=1300,
+        spot_price=101.0,
+    )
+    rebound_observation = PriceObservation(
+        timestamp=1120,
+        market_start_epoch=1000,
+        market_end_epoch=1300,
+        spot_price=99.0,
+    )
+    ensemble = Ensemble(
+        models=[
+            StaticModel("short_momentum", 0.48),
+            StaticModel("garch_1_1", 0.47),
+            StaticModel("student_t_garch", 0.46),
+            StaticModel("har_realized_volatility", 0.48),
+        ],
+        market_prior_weight=0.20,
+        disagreement_shrink=0.0,
+        horizon_confidence_min_multiplier=1.0,
+    )
+    up_book = make_book(0.29, 0.31)
+    down_book = make_book(0.69, 0.71)
+
+    continuation = ensemble.forecast(
+        continuation_window,
+        continuation_observation,
+        up_book,
+        down_book,
+    )
+    rebound = ensemble.forecast(
+        rebound_window,
+        rebound_observation,
+        up_book,
+        down_book,
+    )
+
+    assert continuation is not None
+    assert rebound is not None
+    assert continuation.market_prior_p_up is not None
+    assert continuation.market_prior_p_up < continuation.p_up < 0.5
+    assert rebound.market_prior_p_up < rebound.p_up < 0.5
+    assert continuation.p_up < rebound.p_up

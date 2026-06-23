@@ -1,7 +1,8 @@
 #!/usr/bin/env zsh
 set -euo pipefail
 
-ROOT="/Users/ethanwei/Documents/Codex/2026-06-04/i-want-to-explore-more-intraday"
+SCRIPT_DIR="${0:A:h}"
+ROOT="${SCRIPT_DIR:h}"
 RUNTIME="$HOME/Library/Application Support/poly5m-paper-trader"
 mkdir -p "$RUNTIME" "$RUNTIME/outputs/paper_trader" "$RUNTIME/work/pycache" "$HOME/Library/LaunchAgents"
 
@@ -11,14 +12,14 @@ cp -R "$ROOT/config" "$RUNTIME/"
 cp "$ROOT/pyproject.toml" "$RUNTIME/"
 chmod +x "$RUNTIME/scripts/"*.sh "$RUNTIME/scripts/"*.py
 
-cat > "$HOME/Library/LaunchAgents/com.ethan.poly5m.paperbot.plist" <<EOF
+cat > "$HOME/Library/LaunchAgents/com.poly5m.paperbot.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
   "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
   <key>Label</key>
-  <string>com.ethan.poly5m.paperbot</string>
+  <string>com.poly5m.paperbot</string>
   <key>EnvironmentVariables</key>
   <dict>
     <key>POLY5M_ROOT</key>
@@ -49,14 +50,14 @@ cat > "$HOME/Library/LaunchAgents/com.ethan.poly5m.paperbot.plist" <<EOF
 </plist>
 EOF
 
-cat > "$HOME/Library/LaunchAgents/com.ethan.poly5m.maintenance.plist" <<EOF
+cat > "$HOME/Library/LaunchAgents/com.poly5m.maintenance.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
   "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
   <key>Label</key>
-  <string>com.ethan.poly5m.maintenance</string>
+  <string>com.poly5m.maintenance</string>
   <key>EnvironmentVariables</key>
   <dict>
     <key>POLY5M_ROOT</key>
@@ -92,20 +93,20 @@ cat > "$HOME/Library/LaunchAgents/com.ethan.poly5m.maintenance.plist" <<EOF
 </plist>
 EOF
 
-launchctl unload "$HOME/Library/LaunchAgents/com.ethan.poly5m.paperbot.plist" 2>/dev/null || true
-launchctl unload "$HOME/Library/LaunchAgents/com.ethan.poly5m.maintenance.plist" 2>/dev/null || true
-launchctl load "$HOME/Library/LaunchAgents/com.ethan.poly5m.paperbot.plist"
-launchctl load "$HOME/Library/LaunchAgents/com.ethan.poly5m.maintenance.plist"
+launchctl unload "$HOME/Library/LaunchAgents/com.poly5m.paperbot.plist" 2>/dev/null || true
+launchctl unload "$HOME/Library/LaunchAgents/com.poly5m.maintenance.plist" 2>/dev/null || true
+launchctl load "$HOME/Library/LaunchAgents/com.poly5m.paperbot.plist"
+launchctl load "$HOME/Library/LaunchAgents/com.poly5m.maintenance.plist"
 
 echo "Installed and started:"
-echo "  com.ethan.poly5m.paperbot"
-echo "  com.ethan.poly5m.maintenance"
+echo "  com.poly5m.paperbot"
+echo "  com.poly5m.maintenance"
 echo
 echo "Runtime directory:"
 echo "  $RUNTIME"
 echo
 echo "Check status:"
-echo "  launchctl list | grep com.ethan.poly5m"
+echo "  launchctl list | grep com.poly5m"
 echo
 echo "Tail logs:"
 echo "  tail -f \"$RUNTIME/outputs/paper_trader/launchd.err.log\""

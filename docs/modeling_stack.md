@@ -49,8 +49,8 @@ Deep sequence models such as DeepLOB, Temporal Fusion Transformer, N-BEATS,
 PatchTST, TiDE, and TimeMixer are relevant future research directions. They are
 not included in the live trader because this repo does not yet have a large
 walk-forward training set of BTC 5m terminal labels plus crypto order-book
-features. Adding them without that dataset would make the public repo look more
-impressive but would not make the trader more honest.
+features. Adding them without that dataset would increase complexity without
+improving evidence quality or forecast calibration.
 
 ## Why online approximations
 
@@ -122,8 +122,11 @@ evidence rather than independent new bets. The paper config adds a small
 same-market reentry probability haircut and a Kelly decay for each prior entry
 in that market. This does not cap entries; it makes the sizing acknowledge that
 several ticks from the same interval usually reuse the same underlying thesis.
-The current defaults use a `1.0%` probability haircut and `0.55x` Kelly decay
-per prior same-market entry.
+The current defaults use a small `0.2%` same-side probability haircut and
+`0.90x` Kelly decay, with larger soft penalties for opposite-side and late
+reentries. Cheap continuation underdogs also receive their own `2.4%`
+probability haircut and `0.55x` Kelly scale because the latest paper-run
+evidence showed that cohort was the biggest overconfidence leak.
 
 ## Research Principle
 
@@ -149,11 +152,14 @@ calibration can also use `--interval 1s`, which is slower but gives better
 coverage of first-30-second and market-age effects. Do not treat tiny `1s`
 smoke runs as accuracy evidence; they only verify the data path.
 
-The backtester now reports chronological train/test confidence calibration. It
-learns reliability buckets on the train window by model, market age, and
-reported confidence, then scores raw and calibrated probabilities on the
-held-out test window. This is the correct evidence source for answering "when a
-model says 70%, how often does it actually win?"
+The backtester now reports chronological train/test confidence calibration and
+separates full-sample diagnostics from train-only weight selection. It learns
+reliability buckets on the train window by model, market age, and reported
+confidence, then scores raw and calibrated probabilities on the held-out test
+window. It also reports holdout weight profiles where recommended weights are
+trained only on the first chronological slice and evaluated only on the final
+slice. This is the correct evidence source for answering "when a model says
+70%, how often does it actually win?"
 
 Recent real BTC 7-day, 1-minute train/test evidence showed volatility-family
 models remained the most reliable raw predictors by Brier score, while simple

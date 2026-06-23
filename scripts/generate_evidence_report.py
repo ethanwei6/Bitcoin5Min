@@ -89,6 +89,103 @@ def spot_quality(snapshots: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def book_digest(snapshot: dict[str, Any], key: str) -> dict[str, Any] | None:
+    book = snapshot.get(key)
+    return book if isinstance(book, dict) else None
+
+
+def best_ask_price(snapshot: dict[str, Any], key: str) -> float | None:
+    book = book_digest(snapshot, key)
+    if not book:
+        return None
+    ask = book.get("best_ask") or {}
+    value = ask.get("price")
+    return float(value) if value is not None else None
+
+
+def book_hash(snapshot: dict[str, Any], key: str) -> str | None:
+    book = book_digest(snapshot, key)
+    if not book:
+        return None
+    value = book.get("hash")
+    return str(value) if value else None
+
+
+def change_count(values: list[Any]) -> int:
+    return sum(1 for left, right in zip(values, values[1:]) if left != right)
+
+
+def latest_snapshot_lags(signals: list[dict[str, Any]], snapshots: list[dict[str, Any]]) -> list[float]:
+    by_market: dict[str, list[float]] = defaultdict(list)
+    for snapshot in snapshots:
+        market = snapshot.get("market") or {}
+        slug = market.get("slug")
+        if slug is None:
+            continue
+        by_market[str(slug)].append(float(snapshot.get("timestamp", 0.0)))
+    for rows in by_market.values():
+        rows.sort()
+
+    lags = []
+    for signal in signals:
+        slug = signal.get("market_slug")
+        if slug is None:
+            continue
+        timestamp = float(signal.get("timestamp", 0.0))
+        candidates = [item for item in by_market.get(str(slug), []) if item <= timestamp]
+        if not candidates:
+            continue
+        lags.append(timestamp - candidates[-1])
+    return lags
+
+
+def data_freshness(snapshots: list[dict[str, Any]], signals: list[dict[str, Any]]) -> dict[str, Any]:
+    ordered = sorted(snapshots, key=lambda row: float(row.get("timestamp", 0.0)))
+    market_snapshots = [row for row in ordered if row.get("market")]
+    decision_snapshots = [
+        row for row in market_snapshots if not bool(row.get("settle_only"))
+    ]
+    intervals = [
+        float(right.get("timestamp", 0.0)) - float(left.get("timestamp", 0.0))
+        for left, right in zip(ordered, ordered[1:])
+        if float(right.get("timestamp", 0.0)) >= float(left.get("timestamp", 0.0))
+    ]
+    up_hashes = [book_hash(row, "up_book") for row in decision_snapshots if book_hash(row, "up_book")]
+    down_hashes = [book_hash(row, "down_book") for row in decision_snapshots if book_hash(row, "down_book")]
+    up_asks = [best_ask_price(row, "up_book") for row in decision_snapshots if best_ask_price(row, "up_book") is not None]
+    down_asks = [
+        best_ask_price(row, "down_book")
+        for row in decision_snapshots
+        if best_ask_price(row, "down_book") is not None
+    ]
+    lags = latest_snapshot_lags(signals, ordered)
+    missing_up_book = sum(1 for row in decision_snapshots if not book_digest(row, "up_book"))
+    missing_down_book = sum(1 for row in decision_snapshots if not book_digest(row, "down_book"))
+    stale_signal_lags = sum(1 for lag in lags if lag > 7.5)
+    return {
+        "snapshots": len(ordered),
+        "market_snapshots": len(market_snapshots),
+        "decision_snapshots": len(decision_snapshots),
+        "signals": len(signals),
+        "settle_only_snapshots": sum(1 for row in market_snapshots if bool(row.get("settle_only"))),
+        "median_snapshot_interval_seconds": statistics.median(intervals) if intervals else 0.0,
+        "p95_snapshot_interval_seconds": percentile(intervals, 95),
+        "max_snapshot_interval_seconds": max(intervals) if intervals else 0.0,
+        "missing_up_book_snapshots": missing_up_book,
+        "missing_down_book_snapshots": missing_down_book,
+        "up_book_hash_changes": change_count(up_hashes),
+        "down_book_hash_changes": change_count(down_hashes),
+        "distinct_up_book_hashes": len(set(up_hashes)),
+        "distinct_down_book_hashes": len(set(down_hashes)),
+        "up_top_ask_changes": change_count(up_asks),
+        "down_top_ask_changes": change_count(down_asks),
+        "median_signal_snapshot_lag_seconds": statistics.median(lags) if lags else 0.0,
+        "p95_signal_snapshot_lag_seconds": percentile(lags, 95),
+        "max_signal_snapshot_lag_seconds": max(lags) if lags else 0.0,
+        "stale_signal_snapshot_lags_over_7_5s": stale_signal_lags,
+    }
+
+
 def settlement_key_from_position(position: dict[str, Any]) -> tuple[str, str, str, str]:
     return (
         str(position["market_slug"]),
@@ -324,6 +421,60 @@ def cohort_diagnostics(
         "price_buckets": {
             name: summarize_pairs(rows)
             for name, rows in price_buckets.items()
+        },
+    }
+
+
+def suppressed_edge_diagnostics(signals: list[dict[str, Any]]) -> dict[str, Any]:
+    executable_rows = []
+    for signal in signals:
+        decision = signal.get("decision") or {}
+        effective_cost = float(decision.get("effective_cost") or 0.0)
+        if effective_cost <= 0.0:
+            continue
+        probability = float(decision.get("probability", 0.5))
+        raw_probability = float(decision.get("raw_probability", probability))
+        executable_rows.append(
+            {
+                "cohort": str(decision.get("trade_cohort") or "none"),
+                "reason": str(decision.get("reason") or ""),
+                "raw_edge": raw_probability - effective_cost,
+                "adjusted_edge": probability - effective_cost,
+                "haircut": float(decision.get("probability_haircut") or 0.0),
+                "effective_cost": effective_cost,
+                "executable_price": float(decision.get("executable_price") or 0.0),
+            }
+        )
+
+    def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
+        raw_edges = [float(row["raw_edge"]) for row in rows]
+        adjusted_edges = [float(row["adjusted_edge"]) for row in rows]
+        haircuts = [float(row["haircut"]) for row in rows]
+        prices = [float(row["executable_price"]) for row in rows]
+        return {
+            "signals": len(rows),
+            "raw_positive_edges": sum(1 for edge in raw_edges if edge >= 0.0),
+            "adjusted_positive_edges": sum(1 for edge in adjusted_edges if edge >= 0.0),
+            "suppressed_raw_positive_edges": sum(
+                1
+                for row in rows
+                if float(row["raw_edge"]) >= 0.0 and float(row["adjusted_edge"]) < 0.0
+            ),
+            "near_raw_edges": sum(1 for edge in raw_edges if edge >= -0.005),
+            "avg_raw_edge": statistics.mean(raw_edges) if raw_edges else 0.0,
+            "avg_adjusted_edge": statistics.mean(adjusted_edges) if adjusted_edges else 0.0,
+            "avg_probability_haircut": statistics.mean(haircuts) if haircuts else 0.0,
+            "avg_executable_price": statistics.mean(prices) if prices else 0.0,
+        }
+
+    by_cohort: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in executable_rows:
+        by_cohort[str(row["cohort"])].append(row)
+    return {
+        "overall": summarize(executable_rows),
+        "by_cohort": {
+            cohort: summarize(rows)
+            for cohort, rows in sorted(by_cohort.items())
         },
     }
 
@@ -578,6 +729,29 @@ def markdown_report(report: dict[str, Any], pairs: list[dict[str, Any]]) -> str:
             f"${row['cost_usd']:.2f} | ${row['pnl_usd']:.2f} | "
             f"{row['avg_fill_price']:.3f} | {row['avg_probability']:.3f} |"
         )
+    edge_overall = report["suppressed_edges"]["overall"]
+    lines.extend(
+        [
+            "",
+            "## Raw Edge Diagnostics",
+            "",
+            f"- Executable signal ticks: `{edge_overall['signals']}`",
+            f"- Raw positive-edge ticks: `{edge_overall['raw_positive_edges']}`",
+            f"- Adjusted positive-edge ticks: `{edge_overall['adjusted_positive_edges']}`",
+            f"- Raw positive edges suppressed by calibration: `{edge_overall['suppressed_raw_positive_edges']}`",
+            f"- Near-edge raw ticks within 0.5c: `{edge_overall['near_raw_edges']}`",
+            "",
+            "| Cohort | Signals | Raw +Edge | Adjusted +Edge | Suppressed Raw +Edge | Avg Raw Edge | Avg Adjusted Edge | Avg Haircut | Avg Price |",
+            "|---|---:|---:|---:|---:|---:|---:|---:|---:|",
+        ]
+    )
+    for name, row in report["suppressed_edges"]["by_cohort"].items():
+        lines.append(
+            f"| `{name}` | {row['signals']} | {row['raw_positive_edges']} | "
+            f"{row['adjusted_positive_edges']} | {row['suppressed_raw_positive_edges']} | "
+            f"{row['avg_raw_edge']:.4f} | {row['avg_adjusted_edge']:.4f} | "
+            f"{row['avg_probability_haircut']:.4f} | {row['avg_executable_price']:.3f} |"
+        )
     lines.extend(
         [
             "",
@@ -588,6 +762,21 @@ def markdown_report(report: dict[str, Any], pairs: list[dict[str, Any]]) -> str:
             f"- Max latency: `{report['execution']['latency_ms_max']:.1f} ms`",
             f"- Median submit top-ask drift: `{report['execution']['submit_top_ask_drift_median']:.4f}`",
             f"- Max submit top-ask drift: `{report['execution']['submit_top_ask_drift_max']:.4f}`",
+            "",
+            "## Data Freshness",
+            "",
+            f"- Market snapshots: `{report['data_freshness']['market_snapshots']}`",
+            f"- Decision-capable snapshots: `{report['data_freshness']['decision_snapshots']}`",
+            f"- Settle-only snapshots: `{report['data_freshness']['settle_only_snapshots']}`",
+            f"- Median snapshot interval: `{report['data_freshness']['median_snapshot_interval_seconds']:.2f}s`",
+            f"- P95 snapshot interval: `{report['data_freshness']['p95_snapshot_interval_seconds']:.2f}s`",
+            f"- Max snapshot interval: `{report['data_freshness']['max_snapshot_interval_seconds']:.2f}s`",
+            f"- Missing UP/DOWN books on decision-capable snapshots: `{report['data_freshness']['missing_up_book_snapshots']}` / `{report['data_freshness']['missing_down_book_snapshots']}`",
+            f"- UP/DOWN book hash changes: `{report['data_freshness']['up_book_hash_changes']}` / `{report['data_freshness']['down_book_hash_changes']}`",
+            f"- UP/DOWN top-ask changes: `{report['data_freshness']['up_top_ask_changes']}` / `{report['data_freshness']['down_top_ask_changes']}`",
+            f"- Median signal-to-snapshot lag: `{report['data_freshness']['median_signal_snapshot_lag_seconds']:.3f}s`",
+            f"- P95 signal-to-snapshot lag: `{report['data_freshness']['p95_signal_snapshot_lag_seconds']:.3f}s`",
+            f"- Signal lags over 7.5s: `{report['data_freshness']['stale_signal_snapshot_lags_over_7_5s']}`",
             "",
             "## Spot Quality",
             "",
@@ -694,7 +883,9 @@ def main() -> None:
         "window": {"since": args.since, "until": args.until},
         "trading": trading_summary(pairs),
         "cohorts": cohort_diagnostics(pairs, snapshots),
+        "suppressed_edges": suppressed_edge_diagnostics(signals),
         "execution": execution_quality(executions),
+        "data_freshness": data_freshness(snapshots, signals),
         "spot_quality": spot_quality(snapshots),
         "calibration": calibration(signals, winning_by_market),
         "market_level_calibration": market_level_calibration(signals, winning_by_market),

@@ -52,6 +52,8 @@ class RiskEngine:
         consecutive_losses: int,
         seconds_from_start: float,
         seconds_to_end: float,
+        up_entries: int = 0,
+        down_entries: int = 0,
     ) -> TradeDecision:
         if len(forecast.forecasts) < self.config.min_models_required:
             return self._reject("NONE", "not enough model forecasts", forecast.p_up)
@@ -121,12 +123,22 @@ class RiskEngine:
             seconds_to_end=seconds_to_end,
         )
         probability_haircut = self._probability_haircut(trade_cohort)
-        probability_haircut += self._same_market_reentry_haircut(market_entries)
+        same_side_entries = up_entries if side == "UP" else down_entries
+        opposite_side_entries = down_entries if side == "UP" else up_entries
+        probability_haircut += self._same_market_reentry_haircut(
+            market_entries=market_entries,
+            same_side_entries=same_side_entries,
+            opposite_side_entries=opposite_side_entries,
+            seconds_to_end=seconds_to_end,
+        )
         adjusted_probability = max(0.01, win_probability - probability_haircut)
         effective_cost = executable_price + taker_fee_per_share(executable_price, self.config.fee_rate)
         edge = adjusted_probability - effective_cost
         kelly_scale = self._kelly_scale(trade_cohort) * self._same_market_reentry_kelly_scale(
-            market_entries
+            market_entries=market_entries,
+            same_side_entries=same_side_entries,
+            opposite_side_entries=opposite_side_entries,
+            seconds_to_end=seconds_to_end,
         )
         if edge < self.config.min_edge:
             return TradeDecision(
@@ -295,6 +307,8 @@ class RiskEngine:
         haircut = 0.0
         if "underdog" in trade_cohort:
             haircut += max(0.0, self.config.underdog_probability_haircut)
+        if "underdog_continuation" in trade_cohort:
+            haircut += max(0.0, self.config.underdog_continuation_probability_haircut)
         if "rebound" in trade_cohort:
             haircut += max(0.0, self.config.rebound_probability_haircut)
         if trade_cohort.startswith("late_") and "underdog" in trade_cohort:
@@ -305,17 +319,50 @@ class RiskEngine:
         scale = 1.0
         if "underdog" in trade_cohort:
             scale *= max(0.0, self.config.underdog_kelly_scale)
+        if "underdog_continuation" in trade_cohort:
+            scale *= max(0.0, self.config.underdog_continuation_kelly_scale)
         if "rebound" in trade_cohort:
             scale *= max(0.0, self.config.rebound_kelly_scale)
         if trade_cohort.startswith("late_") and "underdog" in trade_cohort:
             scale *= max(0.0, self.config.late_underdog_kelly_scale)
         return scale
 
-    def _same_market_reentry_haircut(self, market_entries: int) -> float:
-        return max(0.0, self.config.same_market_reentry_probability_haircut) * max(
-            0, market_entries
+    def _same_market_reentry_haircut(
+        self,
+        *,
+        market_entries: int,
+        same_side_entries: int,
+        opposite_side_entries: int,
+        seconds_to_end: float,
+    ) -> float:
+        haircut = max(0.0, self.config.same_market_reentry_probability_haircut) * max(
+            0, same_side_entries
         )
+        haircut += max(0.0, self.config.same_market_opposite_side_probability_haircut) * max(
+            0, opposite_side_entries
+        )
+        if market_entries > 0 and seconds_to_end <= self.config.late_underdog_seconds:
+            haircut += max(0.0, self.config.same_market_late_reentry_probability_haircut) * max(
+                0, market_entries
+            )
+        return haircut
 
-    def _same_market_reentry_kelly_scale(self, market_entries: int) -> float:
-        decay = min(1.0, max(0.0, self.config.same_market_reentry_kelly_decay))
-        return decay ** max(0, market_entries)
+    def _same_market_reentry_kelly_scale(
+        self,
+        *,
+        market_entries: int,
+        same_side_entries: int,
+        opposite_side_entries: int,
+        seconds_to_end: float,
+    ) -> float:
+        same_decay = min(1.0, max(0.0, self.config.same_market_reentry_kelly_decay))
+        opposite_decay = min(
+            1.0,
+            max(0.0, self.config.same_market_opposite_side_kelly_decay),
+        )
+        late_decay = min(1.0, max(0.0, self.config.same_market_late_reentry_kelly_decay))
+        scale = same_decay ** max(0, same_side_entries)
+        scale *= opposite_decay ** max(0, opposite_side_entries)
+        if market_entries > 0 and seconds_to_end <= self.config.late_underdog_seconds:
+            scale *= late_decay ** max(0, market_entries)
+        return scale

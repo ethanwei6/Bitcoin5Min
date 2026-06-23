@@ -17,15 +17,37 @@ def load_jsonl(path: Path) -> list[dict[str, Any]]:
         return [json.loads(line) for line in handle if line.strip()]
 
 
+def settlement_key_from_position(position: dict[str, Any]) -> tuple[str, str, str, str]:
+    return (
+        str(position["market_slug"]),
+        str(position["side"]),
+        f"{float(position['cost_usd']):.12f}",
+        f"{float(position['shares']):.12f}",
+    )
+
+
+def settlement_key(settlement: dict[str, Any]) -> tuple[str, str, str, str]:
+    return (
+        str(settlement["market_slug"]),
+        str(settlement["side"]),
+        f"{float(settlement['cost_usd']):.12f}",
+        f"{float(settlement['shares']):.12f}",
+    )
+
+
 def pair_trades(output_dir: Path) -> list[dict[str, Any]]:
     trades = load_jsonl(output_dir / "trades.jsonl")
     official = load_jsonl(output_dir / "official_settlements.jsonl")
     proxy = load_jsonl(output_dir / "settlements.jsonl")
     settlements = official if official else proxy
+    settlements_by_key: dict[tuple[str, str, str, str], list[dict[str, Any]]] = defaultdict(list)
+    for settlement in settlements:
+        settlements_by_key[settlement_key(settlement)].append(settlement)
     rows = []
     for index, trade in enumerate(trades):
-        settlement = settlements[index] if index < len(settlements) else None
         position = trade["position"]
+        key = settlement_key_from_position(position)
+        settlement = settlements_by_key[key].pop(0) if settlements_by_key.get(key) else None
         pnl = float(settlement["pnl_usd"]) if settlement else None
         rows.append(
             {

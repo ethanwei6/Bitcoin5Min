@@ -63,12 +63,18 @@ class BotConfig:
     underdog_probability_haircut: float = 0.0
     rebound_probability_haircut: float = 0.0
     late_underdog_probability_haircut: float = 0.0
+    underdog_continuation_probability_haircut: float = 0.0
     underdog_kelly_scale: float = 1.0
+    underdog_continuation_kelly_scale: float = 1.0
     rebound_kelly_scale: float = 1.0
     late_underdog_kelly_scale: float = 1.0
     late_underdog_seconds: float = 60.0
     same_market_reentry_probability_haircut: float = 0.0
     same_market_reentry_kelly_decay: float = 1.0
+    same_market_opposite_side_probability_haircut: float = 0.0
+    same_market_opposite_side_kelly_decay: float = 1.0
+    same_market_late_reentry_probability_haircut: float = 0.0
+    same_market_late_reentry_kelly_decay: float = 1.0
 
 
 def _require(data: dict[str, Any], key: str) -> Any:
@@ -159,7 +165,13 @@ def load_config(path: str | Path) -> BotConfig:
         late_underdog_probability_haircut=float(
             _optional(raw, "late_underdog_probability_haircut", 0.0)
         ),
+        underdog_continuation_probability_haircut=float(
+            _optional(raw, "underdog_continuation_probability_haircut", 0.0)
+        ),
         underdog_kelly_scale=float(_optional(raw, "underdog_kelly_scale", 1.0)),
+        underdog_continuation_kelly_scale=float(
+            _optional(raw, "underdog_continuation_kelly_scale", 1.0)
+        ),
         rebound_kelly_scale=float(_optional(raw, "rebound_kelly_scale", 1.0)),
         late_underdog_kelly_scale=float(_optional(raw, "late_underdog_kelly_scale", 1.0)),
         late_underdog_seconds=float(_optional(raw, "late_underdog_seconds", 60.0)),
@@ -168,5 +180,17 @@ def load_config(path: str | Path) -> BotConfig:
         ),
         same_market_reentry_kelly_decay=float(
             _optional(raw, "same_market_reentry_kelly_decay", 1.0)
+        ),
+        same_market_opposite_side_probability_haircut=float(
+            _optional(raw, "same_market_opposite_side_probability_haircut", 0.0)
+        ),
+        same_market_opposite_side_kelly_decay=float(
+            _optional(raw, "same_market_opposite_side_kelly_decay", 1.0)
+        ),
+        same_market_late_reentry_probability_haircut=float(
+            _optional(raw, "same_market_late_reentry_probability_haircut", 0.0)
+        ),
+        same_market_late_reentry_kelly_decay=float(
+            _optional(raw, "same_market_late_reentry_kelly_decay", 1.0)
         ),
     )

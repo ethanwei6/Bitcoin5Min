@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from poly_5m_bot.config import load_config
 from poly_5m_bot.models import Ensemble, PriceObservation, RollingPriceWindow
 from poly_5m_bot.risk import taker_fee_per_share
 
@@ -436,11 +437,49 @@ def build_examples(model_rows: dict[str, list[dict[str, Any]]]) -> list[dict[str
                 examples_by_key[key] = {
                     "asset": row["asset"],
                     "timestamp": row["timestamp"],
+                    "seconds_from_start": row.get("seconds_from_start", 0.0),
                     "outcome_up": row["outcome_up"],
                     "models": {},
                 }
             examples_by_key[key]["models"][name] = row["p_up"]
     return list(examples_by_key.values())
+
+
+def train_test_split_examples(
+    examples: list[dict[str, Any]],
+    train_fraction: float,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    ordered = sorted(examples, key=lambda row: (int(row["timestamp"]), str(row["asset"])))
+    if len(ordered) < 2:
+        return ordered, []
+    split = int(len(ordered) * train_fraction)
+    split = min(max(split, 1), len(ordered) - 1)
+    return ordered[:split], ordered[split:]
+
+
+def model_rows_for_examples(
+    model_rows: dict[str, list[dict[str, Any]]],
+    examples: list[dict[str, Any]],
+) -> dict[str, list[dict[str, Any]]]:
+    keys = {(str(row["asset"]), int(row["timestamp"])) for row in examples}
+    return {
+        name: [
+            row
+            for row in rows
+            if (str(row["asset"]), int(row["timestamp"])) in keys
+        ]
+        for name, rows in model_rows.items()
+    }
+
+
+def model_rows_for_asset(
+    model_rows: dict[str, list[dict[str, Any]]],
+    asset: str,
+) -> dict[str, list[dict[str, Any]]]:
+    return {
+        name: [row for row in rows if str(row["asset"]) == asset]
+        for name, rows in model_rows.items()
+    }
 
 
 def profile_rows(
@@ -455,12 +494,34 @@ def profile_rows(
             continue
         rows.append(
             {
+                "asset": example.get("asset"),
+                "timestamp": example.get("timestamp"),
+                "seconds_from_start": example.get("seconds_from_start", 0.0),
                 "p_up": p_up,
                 "outcome_up": example["outcome_up"],
                 "confidence_threshold": confidence_threshold,
             }
         )
     return rows
+
+
+def proxy_trade_bucket_summary(
+    trades: list[dict[str, Any]],
+    bucket_key: str,
+) -> dict[str, dict[str, Any]]:
+    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for trade in trades:
+        grouped[str(trade[bucket_key])].append(trade)
+    return {
+        bucket: {
+            "trades": len(rows),
+            "win_rate": statistics.fmean(1.0 if row["won"] else 0.0 for row in rows),
+            "net_pnl_units": sum(float(row["pnl"]) for row in rows),
+            "avg_edge": statistics.fmean(float(row["edge"]) for row in rows),
+            "avg_win_probability": statistics.fmean(float(row["p_win"]) for row in rows),
+        }
+        for bucket, rows in sorted(grouped.items())
+    }
 
 
 def evaluate_weight_profile(
@@ -486,7 +547,17 @@ def evaluate_weight_profile(
         won = (side_up and row["outcome_up"] == 1.0) or (
             not side_up and row["outcome_up"] == 0.0
         )
-        trades.append({"won": won, "pnl": (1.0 - cost) if won else -cost})
+        trades.append(
+            {
+                "asset": row.get("asset"),
+                "time_bucket": time_bucket(float(row.get("seconds_from_start", 0.0))),
+                "confidence_bucket": confidence_bucket(p_up),
+                "won": won,
+                "pnl": (1.0 - cost) if won else -cost,
+                "edge": edge,
+                "p_win": p_win,
+            }
+        )
     summary.update(
         {
             "proxy_entry_price": entry_price,
@@ -499,13 +570,72 @@ def evaluate_weight_profile(
                 if trades
                 else None
             ),
+            "proxy_by_time_bucket": proxy_trade_bucket_summary(trades, "time_bucket"),
+            "proxy_by_confidence_bucket": proxy_trade_bucket_summary(
+                trades,
+                "confidence_bucket",
+            ),
+            "proxy_by_asset": proxy_trade_bucket_summary(trades, "asset"),
             "weights": weights,
         }
     )
     return summary
 
 
-def candidate_weight_profiles(recommended: dict[str, float]) -> dict[str, dict[str, float]]:
+def holdout_weight_report(
+    model_rows: dict[str, list[dict[str, Any]]],
+    *,
+    train_fraction: float,
+    confidence_threshold: float,
+    entry_price: float,
+    fee_rate: float,
+    min_edge: float,
+    configured_weights: dict[str, float] | None = None,
+) -> dict[str, Any]:
+    examples = build_examples(model_rows)
+    train_examples, test_examples = train_test_split_examples(examples, train_fraction)
+    train_model_rows = model_rows_for_examples(model_rows, train_examples)
+    train_weights = recommended_weights(train_model_rows)
+    profiles = {
+        name: evaluate_weight_profile(
+            test_examples,
+            weights,
+            confidence_threshold=confidence_threshold,
+            entry_price=entry_price,
+            fee_rate=fee_rate,
+            min_edge=min_edge,
+        )
+        for name, weights in candidate_weight_profiles(train_weights).items()
+        if weights and test_examples
+    }
+    if configured_weights and test_examples:
+        profiles["configured_model_weights"] = evaluate_weight_profile(
+            test_examples,
+            configured_weights,
+            confidence_threshold=confidence_threshold,
+            entry_price=entry_price,
+            fee_rate=fee_rate,
+            min_edge=min_edge,
+        )
+    best_profile_name = None
+    if profiles:
+        best_profile_name = max(
+            profiles.items(),
+            key=lambda item: item[1]["proxy_net_pnl_units"],
+        )[0]
+    return {
+        "train_examples": len(train_examples),
+        "test_examples": len(test_examples),
+        "recommended_weights": train_weights,
+        "profiles": profiles,
+        "best_profile": best_profile_name,
+    }
+
+
+def candidate_weight_profiles(
+    recommended: dict[str, float],
+    configured: dict[str, float] | None = None,
+) -> dict[str, dict[str, float]]:
     volatility_core = {
         "ewma_riskmetrics_volatility": 1.35,
         "garch_1_1": 1.50,
@@ -515,7 +645,7 @@ def candidate_weight_profiles(recommended: dict[str, float]) -> dict[str, dict[s
         "regime_switching_volatility": 1.10,
         "merton_jump_diffusion": 0.85,
     }
-    return {
+    profiles = {
         "recommended_calibration": recommended,
         "equal_all_models": {
             name: 1.0
@@ -548,6 +678,9 @@ def candidate_weight_profiles(recommended: dict[str, float]) -> dict[str, dict[s
         },
         "gjr_only": {"gjr_threshold_garch": 1.0},
     }
+    if configured:
+        profiles["configured_model_weights"] = configured
+    return profiles
 
 
 def asset_specs(selected: list[str] | None) -> list[AssetSpec]:
@@ -562,6 +695,7 @@ def replay_asset(
     candles: list[Candle],
     *,
     confidence_threshold: float,
+    model_weights: dict[str, float] | None = None,
 ) -> dict[str, Any]:
     prices = price_by_second(candles)
     sample_seconds = infer_sample_seconds(candles)
@@ -572,7 +706,7 @@ def replay_asset(
         ),
         max_start_capture_lag_seconds=max(65, int(sample_seconds * 2)),
     )
-    ensemble = Ensemble()
+    ensemble = Ensemble(model_weights=model_weights or None)
     model_rows: dict[str, list[dict[str, Any]]] = defaultdict(list)
     intervals = 0
     evaluated_points = 0
@@ -617,6 +751,7 @@ def replay_asset(
         "symbol": spec.symbol,
         "polymarket_slug_prefix": spec.polymarket_slug_prefix,
         "candles": len(candles),
+        "sample_seconds": sample_seconds,
         "evaluated_points": evaluated_points,
         "models": {name: summarize(rows) for name, rows in sorted(model_rows.items())},
         "rows": model_rows,
@@ -648,21 +783,180 @@ def recommended_weights(model_rows: dict[str, list[dict[str, Any]]]) -> dict[str
     return weights
 
 
+def data_quality_report(
+    assets: list[dict[str, Any]],
+    *,
+    requested_interval: str,
+    bot_sample_interval_seconds: float | None,
+    market_interval_seconds: float,
+) -> dict[str, Any]:
+    sample_seconds = [
+        float(asset["sample_seconds"])
+        for asset in assets
+        if asset.get("sample_seconds") is not None
+    ]
+    if not sample_seconds:
+        return {
+            "requested_interval": requested_interval,
+            "historical_sample_seconds_median": None,
+            "historical_sample_seconds_max": None,
+            "requested_sample_seconds": None,
+            "bot_sample_interval_seconds": bot_sample_interval_seconds,
+            "market_interval_seconds": market_interval_seconds,
+            "historical_samples_per_market": None,
+            "bot_samples_per_market": None,
+            "cadence_ratio_to_bot": None,
+            "cadence_ratio_to_requested": None,
+            "requested_interval_match": None,
+            "asset_sample_seconds": {},
+            "grade": "missing",
+            "limitations": ["No candle cadence could be inferred from the fetched data."],
+        }
+    median_sample = statistics.median(sample_seconds)
+    max_sample = max(sample_seconds)
+    try:
+        requested_sample_seconds = interval_ms(requested_interval) / 1000.0
+    except ValueError:
+        requested_sample_seconds = None
+    bot_samples = (
+        market_interval_seconds / bot_sample_interval_seconds
+        if bot_sample_interval_seconds and bot_sample_interval_seconds > 0
+        else None
+    )
+    historical_samples = market_interval_seconds / median_sample if median_sample > 0 else None
+    cadence_ratio = (
+        median_sample / bot_sample_interval_seconds
+        if bot_sample_interval_seconds and bot_sample_interval_seconds > 0
+        else None
+    )
+    cadence_ratio_to_requested = (
+        median_sample / requested_sample_seconds
+        if requested_sample_seconds and requested_sample_seconds > 0
+        else None
+    )
+    requested_interval_match = (
+        cadence_ratio_to_requested <= 1.25
+        if cadence_ratio_to_requested is not None
+        else None
+    )
+    if cadence_ratio is None:
+        grade = "research_only"
+    elif cadence_ratio <= 1.25:
+        grade = "bot_cadence"
+    elif median_sample <= 10.0:
+        grade = "near_bot_cadence"
+    else:
+        grade = "coarse_research_only"
+
+    limitations = [
+        "This replay uses underlying exchange candles, not historical Polymarket CLOB quotes, queue position, or fillable depth.",
+        "Trading PnL in this report is a binary-price proxy; live paper runs remain the authority for executable entries and settlements.",
+    ]
+    if cadence_ratio is not None and cadence_ratio > 1.25:
+        limitations.append(
+            "Historical candle cadence is coarser than the bot polling cadence, so this report cannot prove second-by-second entry timing edge."
+        )
+    if requested_interval_match is False:
+        limitations.append(
+            "Fetched candle cadence is coarser than the requested interval; verify the exchange supports this interval before treating the replay as high-frequency evidence."
+        )
+    if median_sample >= 60.0:
+        limitations.append(
+            "Minute candles only observe one price per minute; they miss intraminute path, late reversals, and quote movement inside each 5-minute market."
+        )
+    return {
+        "requested_interval": requested_interval,
+        "requested_sample_seconds": requested_sample_seconds,
+        "historical_sample_seconds_median": median_sample,
+        "historical_sample_seconds_max": max_sample,
+        "bot_sample_interval_seconds": bot_sample_interval_seconds,
+        "market_interval_seconds": market_interval_seconds,
+        "historical_samples_per_market": historical_samples,
+        "bot_samples_per_market": bot_samples,
+        "cadence_ratio_to_bot": cadence_ratio,
+        "cadence_ratio_to_requested": cadence_ratio_to_requested,
+        "requested_interval_match": requested_interval_match,
+        "asset_sample_seconds": {
+            str(asset["asset"]): float(asset["sample_seconds"])
+            for asset in assets
+            if asset.get("asset") is not None and asset.get("sample_seconds") is not None
+        },
+        "grade": grade,
+        "limitations": limitations,
+    }
+
+
 def markdown(report: dict[str, Any]) -> str:
     lines = [
         "# Underlying Crypto Model Backtest",
         "",
         f"Generated: `{report['generated_at']}`",
-        f"Source: `Binance spot klines`, interval `{report['interval']}`, lookback `{report['days']}d`",
+        f"Source: real exchange candles (`Binance` spot klines and `Hyperliquid` candle snapshots), interval `{report['interval']}`, lookback `{report['days']}d`",
+        f"Configured weights: `{report['config_path']}`",
         "",
+        "This is an underlying-price model backtest. It does not replay historical Polymarket CLOB quotes, fills, fees, or resolution latency.",
+        "",
+        "## Data Adequacy",
+        "",
+        f"Grade: `{report['data_quality']['grade']}`",
+        "",
+        "| Requested Candle Interval | Requested Sample | Historical Median Sample | Actual / Requested | Historical Samples / Market | Bot Sample Interval | Bot Samples / Market | Cadence Ratio To Bot |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|",
+        "| `{}` | {} | {} | {} | {} | {} | {} | {} |".format(
+            report["data_quality"]["requested_interval"],
+            (
+                f"{report['data_quality']['requested_sample_seconds']:.1f}s"
+                if report["data_quality"]["requested_sample_seconds"] is not None
+                else ""
+            ),
+            (
+                f"{report['data_quality']['historical_sample_seconds_median']:.1f}s"
+                if report["data_quality"]["historical_sample_seconds_median"] is not None
+                else ""
+            ),
+            (
+                f"{report['data_quality']['cadence_ratio_to_requested']:.1f}x"
+                if report["data_quality"]["cadence_ratio_to_requested"] is not None
+                else ""
+            ),
+            (
+                f"{report['data_quality']['historical_samples_per_market']:.1f}"
+                if report["data_quality"]["historical_samples_per_market"] is not None
+                else ""
+            ),
+            (
+                f"{report['data_quality']['bot_sample_interval_seconds']:.1f}s"
+                if report["data_quality"]["bot_sample_interval_seconds"] is not None
+                else ""
+            ),
+            (
+                f"{report['data_quality']['bot_samples_per_market']:.1f}"
+                if report["data_quality"]["bot_samples_per_market"] is not None
+                else ""
+            ),
+            (
+                f"{report['data_quality']['cadence_ratio_to_bot']:.1f}x"
+                if report["data_quality"]["cadence_ratio_to_bot"] is not None
+                else ""
+            ),
+        ),
+        "",
+        "Limitations:",
+    ]
+    for limitation in report["data_quality"]["limitations"]:
+        lines.append(f"- {limitation}")
+    lines.extend(
+        [
+            "",
         "## Polymarket 5M Crypto Universe",
         "",
-        "| Asset | Slug Prefix | Exchange Symbol | Candles | Evaluated Points |",
-        "|---|---|---|---:|---:|",
-    ]
+        "| Asset | Slug Prefix | Exchange Symbol | Sample Seconds | Candles | Evaluated Points |",
+        "|---|---|---|---:|---:|---:|",
+        ]
+    )
     for asset in report["assets"]:
         lines.append(
-            f"| {asset['asset']} | `{asset['polymarket_slug_prefix']}` | `{asset['source']}:{asset['symbol']}` | {asset['candles']} | {asset['evaluated_points']} |"
+            f"| {asset['asset']} | `{asset['polymarket_slug_prefix']}` | `{asset['source']}:{asset['symbol']}` | {asset['sample_seconds']:.1f} | {asset['candles']} | {asset['evaluated_points']} |"
         )
     lines.extend(
         [
@@ -689,7 +983,15 @@ def markdown(report: dict[str, Any]) -> str:
                 row["even_odds_pnl_units"],
             )
         )
-    lines.extend(["", "## Recommended Research Weights", ""])
+    lines.extend(
+        [
+            "",
+            "## Full-Sample Research Weights",
+            "",
+            "These are descriptive diagnostics computed on the whole sample. Use the chronological holdout section below for less optimistic live-weight evidence.",
+            "",
+        ]
+    )
     for name, weight in report["recommended_weights"].items():
         lines.append(f"- `{name}`: `{weight}`")
     lines.extend(
@@ -718,6 +1020,141 @@ def markdown(report: dict[str, Any]) -> str:
                 row["proxy_net_pnl_units"],
             )
         )
+    lines.extend(
+        [
+            "",
+            "## Chronological Holdout Weight Profiles",
+            "",
+            f"Weights in `holdout_recommended_calibration` are trained on the first `{report['holdout_train_examples']}` examples and evaluated only on the final `{report['holdout_test_examples']}` examples.",
+            "",
+            "### Holdout-Trained Weights",
+            "",
+        ]
+    )
+    if report["holdout_recommended_weights"]:
+        for name, weight in report["holdout_recommended_weights"].items():
+            lines.append(f"- `{name}`: `{weight}`")
+    else:
+        lines.append("- No train-only weights were available; increase lookback or lower the minimum sample requirement.")
+    lines.extend(
+        [
+            "",
+            "| Profile | Brier | Log Loss | Proxy Trades | Proxy Win Rate | Proxy Net PnL Units |",
+            "|---|---:|---:|---:|---:|---:|",
+        ]
+    )
+    for name, row in sorted(
+        report["holdout_weight_profiles"].items(),
+        key=lambda item: item[1]["proxy_net_pnl_units"],
+        reverse=True,
+    ):
+        lines.append(
+            "| `{}` | {} | {} | {} | {} | {:.2f} |".format(
+                name,
+                f"{row['brier']:.4f}" if row["brier"] is not None else "",
+                f"{row['log_loss']:.4f}" if row["log_loss"] is not None else "",
+                row["proxy_trades"],
+                f"{row['proxy_win_rate']:.3f}" if row["proxy_win_rate"] is not None else "",
+                row["proxy_net_pnl_units"],
+            )
+        )
+    holdout_best_name = report.get("holdout_best_profile")
+    if holdout_best_name is None and report["holdout_weight_profiles"]:
+        holdout_best_name = max(
+            report["holdout_weight_profiles"].items(),
+            key=lambda item: item[1]["proxy_net_pnl_units"],
+        )[0]
+    holdout_best = (report["holdout_weight_profiles"] or {}).get(holdout_best_name or "")
+    if holdout_best:
+        lines.extend(
+            [
+                "",
+                "## Holdout Proxy Trade Buckets",
+                "",
+                f"Bucket diagnostics for best holdout profile `{holdout_best_name}`. These show where the simulated binary-entry edge is concentrated.",
+                "",
+                "### By Market Age",
+                "",
+                "| Time From Start | Trades | Win Rate | Net PnL Units | Avg Edge | Avg Win Probability |",
+                "|---|---:|---:|---:|---:|---:|",
+            ]
+        )
+        for bucket, row in holdout_best.get("proxy_by_time_bucket", {}).items():
+            lines.append(
+                f"| `{bucket}` | {row['trades']} | {row['win_rate']:.3f} | "
+                f"{row['net_pnl_units']:.2f} | {row['avg_edge']:.4f} | "
+                f"{row['avg_win_probability']:.3f} |"
+            )
+        lines.extend(
+            [
+                "",
+                "### By Confidence",
+                "",
+                "| Confidence | Trades | Win Rate | Net PnL Units | Avg Edge | Avg Win Probability |",
+                "|---|---:|---:|---:|---:|---:|",
+            ]
+        )
+        for bucket, row in holdout_best.get("proxy_by_confidence_bucket", {}).items():
+            lines.append(
+                f"| `{bucket}` | {row['trades']} | {row['win_rate']:.3f} | "
+                f"{row['net_pnl_units']:.2f} | {row['avg_edge']:.4f} | "
+                f"{row['avg_win_probability']:.3f} |"
+            )
+        if len(holdout_best.get("proxy_by_asset", {})) > 1:
+            lines.extend(
+                [
+                    "",
+                    "### By Asset",
+                    "",
+                    "| Asset | Trades | Win Rate | Net PnL Units | Avg Edge | Avg Win Probability |",
+                    "|---|---:|---:|---:|---:|---:|",
+                ]
+            )
+            for bucket, row in holdout_best.get("proxy_by_asset", {}).items():
+                lines.append(
+                    f"| `{bucket}` | {row['trades']} | {row['win_rate']:.3f} | "
+                    f"{row['net_pnl_units']:.2f} | {row['avg_edge']:.4f} | "
+                    f"{row['avg_win_probability']:.3f} |"
+                )
+    lines.extend(
+        [
+            "",
+            "## Per-Asset Holdout Weight Profiles",
+            "",
+            "Each row trains weights only on that asset's first chronological slice and evaluates the profile on that same asset's held-out slice. Use this table when a live bot trades one asset rather than the whole crypto universe.",
+            "",
+            "| Asset | Train | Test | Best Profile | Brier | Proxy Trades | Proxy Win Rate | Proxy Net PnL Units |",
+            "|---|---:|---:|---|---:|---:|---:|---:|",
+        ]
+    )
+    for asset, row in sorted(report["asset_holdout_weight_profiles"].items()):
+        best_name = row.get("best_profile")
+        best = (row.get("profiles") or {}).get(best_name or "", {})
+        lines.append(
+            "| `{}` | {} | {} | `{}` | {} | {} | {} | {} |".format(
+                asset,
+                row["train_examples"],
+                row["test_examples"],
+                best_name or "",
+                f"{best['brier']:.4f}" if best.get("brier") is not None else "",
+                best.get("proxy_trades", ""),
+                f"{best['proxy_win_rate']:.3f}" if best.get("proxy_win_rate") is not None else "",
+                f"{best['proxy_net_pnl_units']:.2f}" if best.get("proxy_net_pnl_units") is not None else "",
+            )
+        )
+    lines.extend(
+        [
+            "",
+            "### Per-Asset Recommended Weights",
+            "",
+        ]
+    )
+    for asset, row in sorted(report["asset_holdout_weight_profiles"].items()):
+        weights = row.get("recommended_weights") or {}
+        if not weights:
+            continue
+        compact = ", ".join(f"{name}={weight}" for name, weight in sorted(weights.items()))
+        lines.append(f"- `{asset}`: {compact}")
     lines.extend(
         [
             "",
@@ -795,9 +1232,16 @@ def main() -> None:
     parser.add_argument("--fee-rate", type=float, default=0.07)
     parser.add_argument("--train-fraction", type=float, default=0.70)
     parser.add_argument("--min-calibration-bucket-count", type=int, default=30)
+    parser.add_argument(
+        "--config",
+        default="config/paper_btc_5m.json",
+        help="Bot config whose model weights should be tested as the configured ensemble.",
+    )
     parser.add_argument("--reports-dir", default="reports/model_backtests")
     args = parser.parse_args()
 
+    config = load_config(args.config) if args.config else None
+    configured_model_weights = config.model_weights if config is not None else {}
     end_ms = int(time.time() * 1000)
     start_ms = end_ms - int(args.days * 24 * 60 * 60 * 1000)
     assets = []
@@ -813,6 +1257,7 @@ def main() -> None:
             spec,
             candles,
             confidence_threshold=args.confidence_threshold,
+            model_weights=configured_model_weights,
         )
         for name, rows in asset_report.pop("rows").items():
             combined_rows[name].extend(rows)
@@ -831,10 +1276,50 @@ def main() -> None:
         for name, weights in candidate_weight_profiles(recommended).items()
         if weights
     }
+    if configured_model_weights:
+        profiles["configured_model_weights"] = evaluate_weight_profile(
+            examples,
+            configured_model_weights,
+            confidence_threshold=args.confidence_threshold,
+            entry_price=args.entry_price,
+            fee_rate=args.fee_rate,
+            min_edge=args.min_edge,
+        )
+    holdout = holdout_weight_report(
+        combined_rows,
+        train_fraction=args.train_fraction,
+        confidence_threshold=args.confidence_threshold,
+        entry_price=args.entry_price,
+        fee_rate=args.fee_rate,
+        min_edge=args.min_edge,
+        configured_weights=configured_model_weights,
+    )
+    asset_holdouts = {
+        spec.asset: holdout_weight_report(
+            model_rows_for_asset(combined_rows, spec.asset),
+            train_fraction=args.train_fraction,
+            confidence_threshold=args.confidence_threshold,
+            entry_price=args.entry_price,
+            fee_rate=args.fee_rate,
+            min_edge=args.min_edge,
+            configured_weights=configured_model_weights,
+        )
+        for spec in asset_specs(args.asset)
+    }
     calibration = train_test_calibration_report(
         combined_rows,
         train_fraction=args.train_fraction,
         min_bucket_count=args.min_calibration_bucket_count,
+    )
+    data_quality = data_quality_report(
+        assets,
+        requested_interval=args.interval,
+        bot_sample_interval_seconds=(
+            float(config.sample_interval_seconds) if config is not None else None
+        ),
+        market_interval_seconds=(
+            float(config.market_interval_seconds) if config is not None else 300.0
+        ),
     )
     report = {
         "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -846,10 +1331,19 @@ def main() -> None:
         "fee_rate": args.fee_rate,
         "train_fraction": args.train_fraction,
         "min_calibration_bucket_count": args.min_calibration_bucket_count,
+        "config_path": args.config,
+        "configured_model_weights": configured_model_weights,
+        "data_quality": data_quality,
         "assets": assets,
         "combined_models": {name: summarize(rows) for name, rows in sorted(combined_rows.items())},
         "recommended_weights": recommended,
         "weight_profiles": profiles,
+        "holdout_train_examples": holdout["train_examples"],
+        "holdout_test_examples": holdout["test_examples"],
+        "holdout_recommended_weights": holdout["recommended_weights"],
+        "holdout_weight_profiles": holdout["profiles"],
+        "holdout_best_profile": holdout["best_profile"],
+        "asset_holdout_weight_profiles": asset_holdouts,
         "train_test_calibration": calibration,
     }
     reports_dir = Path(args.reports_dir)

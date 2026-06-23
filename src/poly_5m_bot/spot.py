@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import statistics
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from typing import Any
 
@@ -42,15 +43,24 @@ class SpotPriceClient:
         self.sources = sources
         self.max_source_spread_usd = max_source_spread_usd
 
+    def _quote_source(self, source: SpotSourceConfig) -> SpotQuote:
+        payload = get_json(source.url, timeout=5.0)
+        return SpotQuote(source=source.name, price=_extract_price(source.name, payload))
+
     def snapshot(self) -> SpotSnapshot:
         quotes: list[SpotQuote] = []
         failed: list[str] = []
-        for source in self.sources:
-            try:
-                payload = get_json(source.url, timeout=5.0)
-                quotes.append(SpotQuote(source=source.name, price=_extract_price(source.name, payload)))
-            except (HttpError, KeyError, TypeError, ValueError) as exc:
-                failed.append(f"{source.name}: {exc}")
+        with ThreadPoolExecutor(max_workers=max(1, len(self.sources))) as executor:
+            futures = {
+                executor.submit(self._quote_source, source): source
+                for source in self.sources
+            }
+            for future in as_completed(futures):
+                source = futures[future]
+                try:
+                    quotes.append(future.result())
+                except (HttpError, KeyError, TypeError, ValueError) as exc:
+                    failed.append(f"{source.name}: {exc}")
         if not quotes:
             raise RuntimeError("No spot sources returned a usable BTC price")
         prices = [quote.price for quote in quotes]

@@ -4,8 +4,11 @@ import json
 import calendar
 import signal
 import time
+from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from typing import Any
 
 from .config import BotConfig
 from .execution import PaperExecutionSimulator
@@ -16,7 +19,7 @@ from .orderbook import ClobOrderBookClient, OrderBook
 from .paper import PaperBroker
 from .resolution import GammaResolutionClient
 from .risk import RiskEngine
-from .spot import SpotPriceClient
+from .spot import SpotPriceClient, SpotSnapshot
 
 
 @dataclass(frozen=True)
@@ -127,12 +130,12 @@ class PaperTradingBot:
     def tick(self, settle_only: bool = False) -> None:
         timestamp = time.time()
         market = self.discovery.current_market(timestamp)
-        spot = self.spot.snapshot()
 
         official_outcomes = self._official_outcomes_for_due_positions(timestamp)
         self.broker.settle_due_positions_official(official_outcomes, now=timestamp)
 
         if market is None:
+            spot = self.spot.snapshot()
             self.journal.append(
                 "snapshots.jsonl",
                 {"timestamp": timestamp, "market": None, "spot": spot},
@@ -140,14 +143,14 @@ class PaperTradingBot:
             return
 
         if settle_only:
+            spot = self.spot.snapshot()
             self.journal.append(
                 "snapshots.jsonl",
                 {"timestamp": timestamp, "market": market, "spot": spot, "settle_only": True},
             )
             return
 
-        up_book = self._safe_book(market.tokens.up)
-        down_book = self._safe_book(market.tokens.down)
+        spot, up_book, down_book = self._spot_and_books(market)
         observation = PriceObservation(
             timestamp=timestamp,
             market_start_epoch=market.start_epoch,
@@ -175,6 +178,7 @@ class PaperTradingBot:
 
         daily_risk = self._daily_risk_stats()
         market_entries = self._market_entry_count(market.slug)
+        side_entries = self._market_side_entry_counts(market.slug)
         decision = self.risk.decide(
             forecast=forecast,
             up_book=up_book,
@@ -187,6 +191,8 @@ class PaperTradingBot:
             consecutive_losses=daily_risk.consecutive_losses,
             seconds_from_start=market.seconds_from_start,
             seconds_to_end=market.seconds_to_end,
+            up_entries=side_entries["UP"],
+            down_entries=side_entries["DOWN"],
         )
         self.journal.append(
             "signals.jsonl",
@@ -198,6 +204,7 @@ class PaperTradingBot:
                 "cash_usd": self.broker.state.cash_usd,
                 "market_exposure_usd": self.broker.market_exposure(market.slug),
                 "market_entries": market_entries,
+                "market_side_entries": side_entries,
                 "daily_risk": daily_risk,
             },
         )
@@ -241,6 +248,24 @@ class PaperTradingBot:
     def _safe_book(self, token_id: str) -> OrderBook | None:
         try:
             return self.books.get_book(token_id)
+        except Exception as exc:
+            self.journal.append("errors.jsonl", {"error": repr(exc), "token_id": token_id})
+            return None
+
+    def _spot_and_books(self, market) -> tuple[SpotSnapshot, OrderBook | None, OrderBook | None]:
+        with ThreadPoolExecutor(max_workers=3) as executor:
+            spot_future = executor.submit(self.spot.snapshot)
+            up_future = executor.submit(self.books.get_book, market.tokens.up)
+            down_future = executor.submit(self.books.get_book, market.tokens.down)
+
+            spot = spot_future.result()
+            up_book = self._book_result(up_future, market.tokens.up)
+            down_book = self._book_result(down_future, market.tokens.down)
+        return spot, up_book, down_book
+
+    def _book_result(self, future, token_id: str) -> OrderBook | None:
+        try:
+            return future.result()
         except Exception as exc:
             self.journal.append("errors.jsonl", {"error": repr(exc), "token_id": token_id})
             return None
@@ -300,8 +325,27 @@ class PaperTradingBot:
                     if position.get("market_slug") == market_slug:
                         entries += 1
         except (OSError, ValueError):
-            return 0
+                return 0
         return entries
+
+    def _market_side_entry_counts(self, market_slug: str) -> dict[str, int]:
+        path = self.output_dir / "trades.jsonl"
+        counts = {"UP": 0, "DOWN": 0}
+        if not path.exists():
+            return counts
+        try:
+            with path.open("r", encoding="utf-8") as handle:
+                for line in handle:
+                    record = json.loads(line)
+                    position = record.get("position") or {}
+                    if position.get("market_slug") != market_slug:
+                        continue
+                    side = str(position.get("side") or "")
+                    if side in counts:
+                        counts[side] += 1
+        except (OSError, ValueError):
+            return {"UP": 0, "DOWN": 0}
+        return counts
 
     def _daily_risk_stats(self) -> DailyRiskStats:
         trades_path = self.output_dir / "trades.jsonl"
@@ -321,17 +365,29 @@ class PaperTradingBot:
         except (OSError, ValueError):
             return DailyRiskStats(0.0, 0.0, 0)
 
+        settlements_by_key: dict[tuple[str, str, str, str], list[dict[str, Any]]] = defaultdict(list)
+        for settlement in settlements:
+            try:
+                settlements_by_key[self._settlement_key(settlement)].append(settlement)
+            except (KeyError, TypeError, ValueError):
+                continue
+
         pnl = 0.0
         peak = 0.0
         max_drawdown = 0.0
         consecutive_losses = 0
-        for index, trade in enumerate(trades):
+        for trade in trades:
             position = trade.get("position") or {}
             if float(position.get("opened_at", 0.0)) < day_start:
                 continue
-            if index >= len(settlements):
+            try:
+                key = self._settlement_key_from_position(position)
+            except (KeyError, TypeError, ValueError):
                 continue
-            trade_pnl = float(settlements[index].get("pnl_usd", 0.0))
+            matching_settlements = settlements_by_key.get(key)
+            if not matching_settlements:
+                continue
+            trade_pnl = float(matching_settlements.pop(0).get("pnl_usd", 0.0))
             pnl += trade_pnl
             peak = max(peak, pnl)
             max_drawdown = max(max_drawdown, peak - pnl)
@@ -340,6 +396,24 @@ class PaperTradingBot:
             else:
                 consecutive_losses = 0
         return DailyRiskStats(pnl, max_drawdown, consecutive_losses)
+
+    @staticmethod
+    def _settlement_key_from_position(position: dict[str, Any]) -> tuple[str, str, str, str]:
+        return (
+            str(position["market_slug"]),
+            str(position["side"]),
+            f"{float(position['cost_usd']):.12f}",
+            f"{float(position['shares']):.12f}",
+        )
+
+    @staticmethod
+    def _settlement_key(settlement: dict[str, Any]) -> tuple[str, str, str, str]:
+        return (
+            str(settlement["market_slug"]),
+            str(settlement["side"]),
+            f"{float(settlement['cost_usd']):.12f}",
+            f"{float(settlement['shares']):.12f}",
+        )
 
 
 def run_once(config: BotConfig, settle_only: bool = False) -> None:

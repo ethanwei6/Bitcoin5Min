@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import time
 from pathlib import Path
 
 from poly_5m_bot.bot import PaperTradingBot
@@ -81,3 +83,60 @@ def test_bounded_run_drains_open_positions_without_new_trade_ticks(tmp_path: Pat
 
     assert settle_only_flags == [True]
     assert not bot.broker.has_open_positions()
+
+
+def write_jsonl(path: Path, rows: list[dict]) -> None:
+    path.write_text("\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8")
+
+
+def test_daily_risk_stats_match_settlements_by_position_key_not_file_order(tmp_path: Path) -> None:
+    bot = PaperTradingBot(make_config(tmp_path))
+    opened_at = time.time()
+    trades = [
+        {
+            "position": {
+                "market_slug": "btc-updown-5m-a",
+                "market_start_epoch": int(opened_at) - 30,
+                "market_end_epoch": int(opened_at) + 270,
+                "side": "UP",
+                "shares": 10.0,
+                "cost_usd": 5.0,
+                "opened_at": opened_at,
+            }
+        },
+        {
+            "position": {
+                "market_slug": "btc-updown-5m-b",
+                "market_start_epoch": int(opened_at) - 30,
+                "market_end_epoch": int(opened_at) + 270,
+                "side": "DOWN",
+                "shares": 14.0,
+                "cost_usd": 7.0,
+                "opened_at": opened_at + 1.0,
+            }
+        },
+    ]
+    settlements = [
+        {
+            "market_slug": "btc-updown-5m-b",
+            "side": "DOWN",
+            "shares": 14.0,
+            "cost_usd": 7.0,
+            "pnl_usd": -7.0,
+        },
+        {
+            "market_slug": "btc-updown-5m-a",
+            "side": "UP",
+            "shares": 10.0,
+            "cost_usd": 5.0,
+            "pnl_usd": 5.0,
+        },
+    ]
+    write_jsonl(tmp_path / "trades.jsonl", trades)
+    write_jsonl(tmp_path / "official_settlements.jsonl", settlements)
+
+    stats = bot._daily_risk_stats()
+
+    assert stats.realized_pnl_usd == -2.0
+    assert stats.drawdown_usd == 7.0
+    assert stats.consecutive_losses == 1

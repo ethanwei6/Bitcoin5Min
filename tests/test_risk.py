@@ -503,6 +503,88 @@ def test_late_underdog_value_trade_is_scaled_not_hard_blocked() -> None:
     assert scaled.spend_usd < base.spend_usd
 
 
+def test_continuation_underdog_is_softly_calibrated_separately_from_rebound() -> None:
+    forecasts = [
+        ModelForecast("a", 0.37, 101.0, 0.26, "x"),
+        ModelForecast("b", 0.38, 101.0, 0.24, "x"),
+        ModelForecast("c", 0.39, 101.0, 0.22, "x"),
+    ]
+    config = replace(
+        make_config(),
+        min_confidence=0.0,
+        min_edge=0.0,
+        max_contract_entry_price=1.0,
+        max_seconds_after_market_start=0,
+        max_trade_usd=0.0,
+        max_position_usd_per_market=0.0,
+        underdog_probability_haircut=0.003,
+        underdog_continuation_probability_haircut=0.024,
+        rebound_probability_haircut=0.0,
+        underdog_kelly_scale=1.0,
+        underdog_continuation_kelly_scale=0.55,
+        rebound_kelly_scale=1.05,
+    )
+    continuation = EnsembleForecast(
+        p_up=0.38,
+        expected_end_price=101.0,
+        confidence=0.24,
+        forecasts=forecasts,
+        majority_side="UP",
+        majority_count=3,
+        majority_weight=3.0,
+        total_weight=3.0,
+        spot_distance_from_start=4.0,
+    )
+    rebound = EnsembleForecast(
+        p_up=0.38,
+        expected_end_price=99.0,
+        confidence=0.24,
+        forecasts=forecasts,
+        majority_side="UP",
+        majority_count=3,
+        majority_weight=3.0,
+        total_weight=3.0,
+        spot_distance_from_start=-4.0,
+    )
+
+    continuation_decision = RiskEngine(config).decide(
+        forecast=continuation,
+        up_book=make_book(0.30, size=1000.0),
+        down_book=make_book(0.70, size=1000.0),
+        cash_usd=1000.0,
+        market_exposure_usd=0.0,
+        market_entries=0,
+        daily_pnl_usd=0.0,
+        daily_drawdown_usd=0.0,
+        consecutive_losses=0,
+        seconds_from_start=120.0,
+        seconds_to_end=180.0,
+    )
+    rebound_decision = RiskEngine(config).decide(
+        forecast=rebound,
+        up_book=make_book(0.30, size=1000.0),
+        down_book=make_book(0.70, size=1000.0),
+        cash_usd=1000.0,
+        market_exposure_usd=0.0,
+        market_entries=0,
+        daily_pnl_usd=0.0,
+        daily_drawdown_usd=0.0,
+        consecutive_losses=0,
+        seconds_from_start=120.0,
+        seconds_to_end=180.0,
+    )
+
+    assert continuation_decision.should_trade
+    assert rebound_decision.should_trade
+    assert continuation_decision.trade_cohort == "underdog_continuation"
+    assert rebound_decision.trade_cohort == "underdog_rebound"
+    assert round(continuation_decision.probability_haircut, 3) == 0.027
+    assert round(rebound_decision.probability_haircut, 3) == 0.003
+    assert continuation_decision.kelly_scale == 0.55
+    assert rebound_decision.kelly_scale == 1.05
+    assert continuation_decision.spend_usd < rebound_decision.spend_usd
+
+
 def test_same_market_reentry_is_softly_penalized_not_capped() -> None:
     forecasts = [
         ModelForecast("a", 0.30, 101.0, 0.40, "x"),
@@ -564,6 +646,8 @@ def test_same_market_reentry_is_softly_penalized_not_capped() -> None:
         consecutive_losses=0,
         seconds_from_start=130.0,
         seconds_to_end=110.0,
+        up_entries=2,
+        down_entries=0,
     )
 
     assert first.should_trade

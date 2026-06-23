@@ -164,6 +164,18 @@ def trimmed_mean(values: list[float]) -> float:
     return statistics.fmean(ordered[1:-1])
 
 
+def population_variance(values) -> float:
+    count = 0
+    mean = 0.0
+    m2 = 0.0
+    for value in values:
+        count += 1
+        delta = value - mean
+        mean += delta / count
+        m2 += delta * (value - mean)
+    return m2 / count if count else 0.0
+
+
 def completed_interval_samples(
     window: RollingPriceWindow,
     observation: PriceObservation,
@@ -558,12 +570,13 @@ class StudentTGarchModel(ForecastModel):
         if start_price is None:
             return None
         scaled_returns = [ret / math.sqrt(dt) for dt, ret in points]
-        unconditional = max(statistics.pvariance(scaled_returns), 1e-10)
+        unconditional = max(population_variance(scaled_returns), 1e-10)
         omega = max(unconditional * (1.0 - self.alpha - self.beta), 1e-12)
         variance = unconditional
         for eps in scaled_returns:
             variance = omega + self.alpha * eps * eps + self.beta * variance
-        fourth = statistics.fmean((ret - statistics.fmean(scaled_returns)) ** 4 for ret in scaled_returns)
+        mean = statistics.fmean(scaled_returns)
+        fourth = statistics.fmean((ret - mean) ** 4 for ret in scaled_returns)
         kurtosis = fourth / max(unconditional * unconditional, 1e-12)
         df = clamp(6.0 / max(kurtosis - 3.0, 0.25) + 4.0, 4.0, 30.0)
         seconds_left = max(observation.market_end_epoch - observation.timestamp, 1.0)
@@ -696,7 +709,7 @@ class MertonJumpDiffusionModel(ForecastModel):
         continuous_time = max(sum(dt for dt, _ret in continuous_points), 1e-6)
         continuous_mean = 0.25 * sum(ret for _dt, ret in continuous_points) / continuous_time
         continuous_var = max(
-            statistics.pvariance([ret / math.sqrt(dt) for dt, ret in continuous_points])
+            population_variance(ret / math.sqrt(dt) for dt, ret in continuous_points)
             if len(continuous_points) >= 3
             else robust_sigma * robust_sigma,
             1e-10,
@@ -712,7 +725,7 @@ class MertonJumpDiffusionModel(ForecastModel):
             jump_mean = raw_jump_mean * sample_shrink * max(0.25, signed_balance)
         else:
             jump_mean = 0.0
-        jump_var = statistics.pvariance(jump_returns) if len(jump_returns) >= 2 else 0.0
+        jump_var = population_variance(jump_returns) if len(jump_returns) >= 2 else 0.0
         seconds_left = max(observation.market_end_epoch - observation.timestamp, 1.0)
         mean = (continuous_mean + jump_lambda * jump_mean) * seconds_left
         variance = (continuous_var + jump_lambda * (jump_var + jump_mean * jump_mean)) * seconds_left
@@ -825,19 +838,19 @@ def weighted_probability_for_names(
 
 class Ensemble:
     default_model_weights = {
-        "distance_to_start_random_walk": 0.95,
-        "short_momentum": 0.45,
-        "mean_reversion": 0.35,
-        "volatility_fade": 0.30,
-        "ewma_riskmetrics_volatility": 1.55,
-        "garch_1_1": 1.60,
-        "gjr_threshold_garch": 1.65,
-        "har_realized_volatility": 1.55,
-        "student_t_garch": 1.55,
-        "regime_switching_volatility": 1.45,
-        "empirical_interval_knn": 0.00,
-        "merton_jump_diffusion": 0.20,
-        "kalman_local_trend": 0.10,
+        "distance_to_start_random_walk": 0.94,
+        "short_momentum": 0.38,
+        "mean_reversion": 0.96,
+        "volatility_fade": 0.77,
+        "ewma_riskmetrics_volatility": 1.60,
+        "garch_1_1": 1.54,
+        "gjr_threshold_garch": 1.52,
+        "har_realized_volatility": 1.59,
+        "student_t_garch": 1.50,
+        "regime_switching_volatility": 1.46,
+        "empirical_interval_knn": 1.00,
+        "merton_jump_diffusion": 1.40,
+        "kalman_local_trend": 0.96,
         "polymarket_orderbook_imbalance": 0.00,
     }
 
@@ -879,6 +892,7 @@ class Ensemble:
         directional_p_up: float,
         reversion_p_up: float,
         observation: PriceObservation,
+        spot_distance_from_start: float,
     ) -> tuple[float, float]:
         if market_prior is None:
             return p_up, 0.0
@@ -908,7 +922,49 @@ class Ensemble:
         shrink = clamp(shrink, 0.0, 0.72)
         target = market_prior + 0.18 * (directional_p_up - market_prior)
         calibrated = p_up + shrink * (target - p_up)
+        calibrated = self._underdog_dislocation_calibrated_probability(
+            calibrated,
+            market_prior,
+            spot_distance_from_start,
+        )
         return clamp(calibrated, 0.01, 0.99), shrink
+
+    def _underdog_dislocation_calibrated_probability(
+        self,
+        p_up: float,
+        market_prior: float,
+        spot_distance_from_start: float,
+    ) -> float:
+        underdog_side: str | None = None
+        if market_prior < p_up < 0.5:
+            underdog_side = "UP"
+            side_probability = p_up
+            market_side_probability = market_prior
+            signed_distance = spot_distance_from_start
+        elif market_prior > p_up > 0.5:
+            underdog_side = "DOWN"
+            side_probability = 1.0 - p_up
+            market_side_probability = 1.0 - market_prior
+            signed_distance = -spot_distance_from_start
+        else:
+            return p_up
+
+        model_edge_over_market = max(0.0, side_probability - market_side_probability)
+        if underdog_side is None or model_edge_over_market <= 0.0:
+            return p_up
+
+        continuation = signed_distance >= 0.0
+        underdog_depth = clamp((0.5 - side_probability) / 0.35, 0.0, 1.0)
+        dislocation = clamp(model_edge_over_market / 0.18, 0.0, 1.0)
+        continuation_penalty = 0.18 if continuation else 0.06
+        shrink_to_market = (
+            continuation_penalty
+            + 0.22 * underdog_depth
+            + 0.18 * dislocation
+        )
+        cap = 0.58 if continuation else 0.28
+        shrink_to_market = clamp(shrink_to_market, 0.0, cap)
+        return p_up + shrink_to_market * (market_prior - p_up)
 
     def forecast(
         self,
@@ -980,31 +1036,37 @@ class Ensemble:
             anchored_p_up = (1.0 - prior_weight) * robust_p_up + prior_weight * market_prior
         else:
             anchored_p_up = robust_p_up
-        calibration_shrink = (
-            0.08
-            + dispersion * self.disagreement_shrink
-            + 0.35 * model_market_gap
-        )
-        shrink = clamp(calibration_shrink, 0.08, 0.35)
-        raw_p_up = clamp(0.5 + (anchored_p_up - 0.5) * (1.0 - shrink), 0.01, 0.99)
+        if market_prior is None:
+            raw_p_up = clamp(anchored_p_up, 0.01, 0.99)
+        else:
+            calibration_shrink = (
+                0.08
+                + dispersion * self.disagreement_shrink
+                + 0.35 * model_market_gap
+            )
+            shrink = clamp(calibration_shrink, 0.08, 0.35)
+            raw_p_up = clamp(0.5 + (anchored_p_up - 0.5) * (1.0 - shrink), 0.01, 0.99)
         raw_p_up, market_dislocation_shrink = self._market_dislocation_calibrated_probability(
             raw_p_up,
             market_prior,
             directional_p_up,
             reversion_p_up,
             observation,
+            spot_distance_from_start,
         )
         horizon_multiplier = horizon_confidence_multiplier(
             observation,
             min_multiplier=self.horizon_confidence_min_multiplier,
             power=self.horizon_confidence_power,
         )
-        horizon_target = market_prior if market_prior is not None else 0.5
-        p_up = clamp(
-            horizon_target + (raw_p_up - horizon_target) * horizon_multiplier,
-            0.01,
-            0.99,
-        )
+        if market_prior is None:
+            p_up = raw_p_up
+        else:
+            p_up = clamp(
+                market_prior + (raw_p_up - market_prior) * horizon_multiplier,
+                0.01,
+                0.99,
+            )
         expected = sum(
             weight * item.expected_end_price for weight, item in active_weighted_forecasts
         ) / weight_total

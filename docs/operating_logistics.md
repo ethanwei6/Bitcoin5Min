@@ -22,6 +22,15 @@ and should be measured explicitly.
    the current CLOB book before filling. This recheck measures actual request
    latency and catches book moves between signal time and order-intent time.
 
+The paper bot currently uses concurrent REST snapshots because that produces
+simple, auditable ledgers. For latency research, use
+`scripts/probe_polymarket_websocket.mjs`; Polymarket's market WebSocket streams
+book snapshots, price changes, best-bid/ask changes, trades, and resolution
+events for subscribed token IDs. Its report grades whether observed message
+cadence and event timestamp lag support the configured bot sample interval. If
+this strategy is ever promoted beyond paper, the orderbook state should be
+driven by that WebSocket path rather than one-second REST polling.
+
 ## Modeling path
 
 The current ensemble uses explainable short-horizon models plus online
@@ -79,7 +88,7 @@ full Kelly fraction of bankroll to spend is:
 f = (p - c) / (1 - c)
 ```
 
-The default research config uses quarter Kelly (`kelly_fraction: 0.25`) and
+The default research config uses fractional Kelly (`kelly_fraction: 0.35`) and
 targets total current-market exposure before adding to a position. This means a
 fresh signal can still receive meaningful size, but repeated ticks in the same
 market do not keep re-spending as though no position already exists. Optional
@@ -90,8 +99,12 @@ Same-market reentries receive a small additional probability haircut and a
 Kelly decay per prior entry. This is a soft correlation adjustment, not a hard
 entry cap: the bot can still add exposure when the adjusted edge is strong, but
 it no longer treats several highly related ticks as independent evidence. The
-current research defaults use a `1.0%` reentry probability haircut and `0.55x`
-Kelly decay per previous entry in that same market.
+current research defaults use a `0.2%` same-side reentry probability haircut
+and `0.90x` Kelly decay per previous same-side entry. Opposite-side reentries
+receive a larger `0.8%` probability haircut and `0.70x` Kelly decay because
+flipping sides inside the same five-minute market is a stronger signal that the
+model is chasing noise. Late same-market reentries receive an extra `0.4%`
+haircut and `0.85x` decay.
 
 Underdog value trades are scaled inside Kelly rather than blocked. The risk
 engine stores both `raw_probability` and the final haircut-adjusted
@@ -99,6 +112,14 @@ engine stores both `raw_probability` and the final haircut-adjusted
 `underdog_continuation`, or `directional_confidence`. Evidence reports summarize
 these cohorts separately because a profitable underdog-value strategy can have
 a sub-50% win rate while still being positive expectancy.
+
+The current underdog calibration is intentionally asymmetric: continuation
+underdogs receive an additional `2.4%` probability haircut and `0.55x` Kelly
+scale because the latest paper-run evidence showed that cheap continuation
+setups were the main overconfidence leak. Rebound underdogs keep the base
+`0.3%` haircut and a mild `1.05x` Kelly scale because they performed better in
+the same-fill replay evidence. This is a model/fair-value calibration, not a
+hard price cutoff.
 
 Evidence reports also include market-level calibration. Signal-tick calibration
 is useful for seeing what the bot believed through time, but those rows are
@@ -204,7 +225,7 @@ scripts/install_local_launch_agents.sh
 Check status:
 
 ```bash
-launchctl list | grep com.ethan.poly5m
+launchctl list | grep com.poly5m
 ```
 
 Useful logs:

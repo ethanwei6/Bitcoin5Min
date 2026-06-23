@@ -128,9 +128,15 @@ class PolymarketDiscovery:
     def __init__(self, config: PolymarketConfig, interval_seconds: int):
         self.config = config
         self.interval_seconds = interval_seconds
+        self._cached_market: FiveMinuteMarket | None = None
 
     def current_market(self, now: float | None = None) -> FiveMinuteMarket | None:
         timestamp = time.time() if now is None else now
+        if (
+            self._cached_market is not None
+            and self._cached_market.start_epoch <= timestamp < self._cached_market.end_epoch
+        ):
+            return self._cached_market
         base_start = interval_start(timestamp, self.interval_seconds)
         starts = [
             base_start + offset * self.interval_seconds
@@ -150,4 +156,5 @@ class PolymarketDiscovery:
         if not candidates:
             return None
         candidates.sort(key=lambda item: abs(item.start_epoch - base_start))
-        return candidates[0]
+        self._cached_market = candidates[0]
+        return self._cached_market
